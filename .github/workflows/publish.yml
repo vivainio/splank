@@ -11,4 +11,4 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: vivainio/actions/publish-pypi-full@main
+      - uses: vivainio/actions/publish-pypi-full@v1
