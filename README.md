@@ -70,7 +70,7 @@ splank search 'index=main Level=ERROR' [options]
 | `-e, --earliest` | Earliest time (default: -24h) |
 | `-l, --latest` | Latest time (default: now) |
 | `-m, --max-results` | Max results (default: 100) |
-| `-f, --format` | Output format: json, csv, table, [toon](https://github.com/vivainio/toon) (default: toon) |
+| `-f, --format` | Output format: json, csv, table, [toon](https://github.com/toon-format/toon-python) (default: toon) |
 | `-o, --output` | Output file (default: stdout) |
 | `--internal` | Include internal Splunk fields (_bkt, _cd, etc.) |
 | `-w, --width` | Truncate field values to N chars (default: 500, 0=no limit) |
