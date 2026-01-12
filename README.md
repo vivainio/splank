@@ -78,7 +78,7 @@ splank search 'index=main Level=ERROR' [options]
 
 By default, internal Splunk fields (`_bkt`, `_cd`, `_indextime`, `_serial`, `_si`, `_sourcetype`, `_subsecond`) are hidden. Use `--internal` to show them.
 
-The `--zoom` flag is useful when log lines contain JSON - it extracts and parses the JSON from `_raw`, ignoring Splunk metadata.
+The `--zoom` flag is useful when log lines contain JSON - it extracts and parses the JSON from `_raw`, outputs as toon format, and ignores Splunk metadata.
 
 ## Global Options
 
