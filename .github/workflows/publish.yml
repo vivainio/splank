@@ -11,20 +11,4 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set version from release tag
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          echo "Set version to $VERSION"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Build package
-        run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: vivainio/actions/publish-pypi-full@main
