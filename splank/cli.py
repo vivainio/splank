@@ -5,15 +5,52 @@ import csv
 import fnmatch
 import json
 import sys
+
+from toon_format import encode as toon_encode
 from typing import Iterator
 
 from splank import __version__
 from splank.config import get_client, init_config
 
+# Internal Splunk fields to drop by default (keep _time and _raw)
+INTERNAL_FIELDS = {"_bkt", "_cd", "_indextime", "_serial", "_sourcetype", "_subsecond"}
+# Prefixes for array-style fields like _si[0], _si[1], etc.
+INTERNAL_PREFIXES = ("_si",)
+
+
+def truncate_fields(row: dict, width: int | None) -> dict:
+    """Truncate all string fields to width if needed."""
+    if not width:
+        return row
+    result = {}
+    for k, v in row.items():
+        s = str(v)
+        result[k] = s[:width] + "..." if len(s) > width else v
+    return result
+
+
+def filter_internal_fields(row: dict) -> dict:
+    """Remove internal Splunk fields from a row."""
+    return {
+        k: v
+        for k, v in row.items()
+        if k not in INTERNAL_FIELDS and not k.startswith(INTERNAL_PREFIXES)
+    }
+
 
 def output_json(results: list[dict], file: str | None = None) -> None:
     """Output results as JSON."""
     output = json.dumps(results, indent=2)
+    if file:
+        with open(file, "w") as f:
+            f.write(output)
+    else:
+        print(output)
+
+
+def output_toon(results: list[dict], file: str | None = None) -> None:
+    """Output results as TOON (Token-Oriented Object Notation)."""
+    output = toon_encode(results)
     if file:
         with open(file, "w") as f:
             f.write(output)
@@ -123,10 +160,38 @@ def cmd_search(args: argparse.Namespace) -> None:
         stream=use_streaming,
     )
 
+    # Handle --zoom: extract JSON from _raw
+    if args.zoom:
+        zoomed = []
+        for row in results:
+            raw = str(row.get("_raw", "")).strip()
+            if raw.startswith("{"):
+                try:
+                    zoomed.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    pass  # Skip non-JSON rows
+        output_toon(zoomed, args.output)
+        return
+
+    # Apply field transformations
+    def transform(row: dict) -> dict:
+        if not args.internal:
+            row = filter_internal_fields(row)
+        if args.width:
+            row = truncate_fields(row, args.width)
+        return row
+
+    if use_streaming:
+        results = (transform(row) for row in results)
+    else:
+        results = [transform(row) for row in results]
+
     if args.format == "json":
         output_json(list(results), args.output)
     elif args.format == "csv":
         output_csv(list(results), args.output)
+    elif args.format == "toon":
+        output_toon(list(results), args.output)
     else:
         output_table_streaming(results)
 
@@ -382,12 +447,31 @@ def main() -> None:
     search_parser.add_argument(
         "--format",
         "-f",
-        choices=["json", "csv", "table"],
-        default="table",
-        help="Output format",
+        choices=["json", "csv", "table", "toon"],
+        default="toon",
+        help="Output format (default: toon)",
     )
     search_parser.add_argument(
         "--output", "-o", help="Output file (default: stdout)"
+    )
+    search_parser.add_argument(
+        "--internal",
+        action="store_true",
+        help="Include internal Splunk fields (_bkt, _cd, etc.)",
+    )
+    search_parser.add_argument(
+        "--width",
+        "-w",
+        type=int,
+        default=500,
+        metavar="N",
+        help="Truncate field values to N chars (default: 500, 0=no limit)",
+    )
+    search_parser.add_argument(
+        "--zoom",
+        "-z",
+        action="store_true",
+        help="Parse JSON from _raw and output as toon (ignores other fields)",
     )
     search_parser.set_defaults(func=cmd_search)
 
