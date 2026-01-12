@@ -1,9 +1,8 @@
 name: Publish to PyPI
 
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
 
 jobs:
   publish:
@@ -13,6 +12,13 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version from release tag
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          echo "Set version to $VERSION"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
