@@ -70,7 +70,7 @@ splank search 'index=main Level=ERROR' [options]
 | `-e, --earliest` | Earliest time (default: -24h) |
 | `-l, --latest` | Latest time (default: now) |
 | `-m, --max-results` | Max results (default: 100) |
-| `-f, --format` | Output format: json, csv, table, toon (default: toon) |
+| `-f, --format` | Output format: json, csv, table, [toon](https://github.com/vivainio/toon) (default: toon) |
 | `-o, --output` | Output file (default: stdout) |
 | `--internal` | Include internal Splunk fields (_bkt, _cd, etc.) |
 | `-w, --width` | Truncate field values to N chars (default: 500, 0=no limit) |
@@ -78,7 +78,7 @@ splank search 'index=main Level=ERROR' [options]
 
 By default, internal Splunk fields (`_bkt`, `_cd`, `_indextime`, `_serial`, `_si`, `_sourcetype`, `_subsecond`) are hidden. Use `--internal` to show them.
 
-The `--zoom` flag is useful when log lines contain JSON - it extracts and parses the JSON from `_raw`, outputs as toon format, and ignores Splunk metadata.
+The `--zoom` flag is useful when log lines contain JSON - it extracts and parses the JSON from `_raw`, outputs as toon format (compact and human-readable), and ignores Splunk metadata.
 
 ## Global Options
 
