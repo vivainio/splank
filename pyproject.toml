@@ -1,0 +1,35 @@
+[project]
+name = "splank"
+version = "0.0.0.dev0"
+description = "CLI tool for querying Splunk logs. Search indexes, discover fields, and manage search jobs."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+keywords = ["splunk", "cli", "logs", "search", "observability", "siem"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Logging",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "platformdirs>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/vivainio/splank"
+Repository = "https://github.com/vivainio/splank"
+Issues = "https://github.com/vivainio/splank/issues"
+
+[project.scripts]
+splank = "splank.cli:main"
+
+[tool.uv]
+package = true
