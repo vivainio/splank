@@ -5,6 +5,7 @@ import csv
 import fnmatch
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from toon_format import encode as toon_encode
 from typing import Iterator
@@ -141,50 +142,119 @@ def output_table_streaming(results_iter: Iterator[dict]) -> None:
         print("No results")
 
 
+def get_single_profile(args: argparse.Namespace) -> str | None:
+    """Get a single profile from args (for commands that don't support multi-profile)."""
+    if args.profiles:
+        return args.profiles[0]
+    return None
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize credentials file."""
     init_config()
 
 
+def _search_one_profile(
+    profile: str | None,
+    query: str,
+    earliest: str,
+    latest: str,
+    max_results: int,
+) -> tuple[str | None, list[dict]]:
+    """Execute search for a single profile, returning (profile, results)."""
+    client = get_client(profile)
+    results = list(
+        client.search(
+            query=query,
+            earliest=earliest,
+            latest=latest,
+            max_results=max_results,
+            stream=False,
+        )
+    )
+    return profile, results
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     """Execute a search query."""
-    client = get_client(args.profile)
-
-    use_streaming = args.format == "table" and not args.output
-
-    results = client.search(
-        query=args.query,
-        earliest=args.earliest,
-        latest=args.latest,
-        max_results=args.max_results,
-        stream=use_streaming,
-    )
-
-    # Handle --zoom: extract JSON from _raw
-    if args.zoom:
-        zoomed = []
-        for row in results:
-            raw = str(row.get("_raw", "")).strip()
-            if raw.startswith("{"):
-                try:
-                    zoomed.append(json.loads(raw))
-                except json.JSONDecodeError:
-                    pass  # Skip non-JSON rows
-        output_toon(zoomed, args.output)
-        return
+    profiles = args.profiles or [None]  # None = use default profile
+    use_streaming = args.format == "table" and not args.output and len(profiles) == 1
 
     # Apply field transformations
-    def transform(row: dict) -> dict:
+    def transform(row: dict, profile: str | None = None) -> dict:
+        if profile is not None and len(profiles) > 1:
+            row = {"_profile": profile, **row}
         if not args.internal:
             row = filter_internal_fields(row)
         if args.width:
             row = truncate_fields(row, args.width)
         return row
 
-    if use_streaming:
-        results = (transform(row) for row in results)
+    # Single profile: use streaming if appropriate
+    if len(profiles) == 1:
+        client = get_client(profiles[0])
+        results = client.search(
+            query=args.query,
+            earliest=args.earliest,
+            latest=args.latest,
+            max_results=args.max_results,
+            stream=use_streaming,
+        )
+
+        # Handle --zoom: extract JSON from _raw
+        if args.zoom:
+            zoomed = []
+            for row in results:
+                raw = str(row.get("_raw", "")).strip()
+                if raw.startswith("{"):
+                    try:
+                        zoomed.append(json.loads(raw))
+                    except json.JSONDecodeError:
+                        pass  # Skip non-JSON rows
+            output_toon(zoomed, args.output)
+            return
+
+        if use_streaming:
+            results = (transform(row) for row in results)
+        else:
+            results = [transform(row) for row in results]
     else:
-        results = [transform(row) for row in results]
+        # Multiple profiles: run in parallel
+        all_results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=len(profiles)) as executor:
+            futures = {
+                executor.submit(
+                    _search_one_profile,
+                    p,
+                    args.query,
+                    args.earliest,
+                    args.latest,
+                    args.max_results,
+                ): p
+                for p in profiles
+            }
+            for future in as_completed(futures):
+                profile, profile_results = future.result()
+                for row in profile_results:
+                    all_results.append(transform(row, profile))
+
+        # Handle --zoom: extract JSON from _raw
+        if args.zoom:
+            zoomed = []
+            for row in all_results:
+                raw = str(row.get("_raw", "")).strip()
+                if raw.startswith("{"):
+                    try:
+                        parsed = json.loads(raw)
+                        if "_profile" in row:
+                            parsed = {"_profile": row["_profile"], **parsed}
+                        zoomed.append(parsed)
+                    except json.JSONDecodeError:
+                        pass
+            output_toon(zoomed, args.output)
+            return
+
+        results = all_results
 
     if args.format == "json":
         output_json(list(results), args.output)
@@ -198,7 +268,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 def cmd_clear(args: argparse.Namespace) -> None:
     """Clear search jobs to free quota."""
-    client = get_client(args.profile)
+    client = get_client(get_single_profile(args))
 
     # List user's jobs
     jobs = client.list_jobs(count=100)
@@ -226,7 +296,7 @@ def cmd_clear(args: argparse.Namespace) -> None:
 
 def cmd_discover(args: argparse.Namespace) -> None:
     """Discover available indexes via search."""
-    client = get_client(args.profile)
+    client = get_client(get_single_profile(args))
 
     # Use eventcount to discover all searchable indexes (including federated)
     print("Discovering indexes...", file=sys.stderr)
@@ -383,7 +453,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
 
 def cmd_jobs(args: argparse.Namespace) -> None:
     """List search jobs."""
-    client = get_client(args.profile)
+    client = get_client(get_single_profile(args))
 
     jobs = client.list_jobs(count=50)
 
@@ -423,7 +493,10 @@ def main() -> None:
     parser.add_argument(
         "-p",
         "--profile",
-        help="Splunk profile to use (e.g., 'qa', 'prod')",
+        action="append",
+        dest="profiles",
+        metavar="PROFILE",
+        help="Splunk profile to use (repeatable for parallel search)",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
