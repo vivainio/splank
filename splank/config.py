@@ -113,6 +113,11 @@ password = ""
 token = ""
 verify_ssl = true
 """
+    if CREDENTIALS_FILE.exists():
+        print(f"Credentials file already exists: {CREDENTIALS_FILE}")
+        print("Edit it directly or delete it first to reinitialize.")
+        return
+
     CREDENTIALS_FILE.write_text(example)
     CREDENTIALS_FILE.chmod(0o600)
     print(f"Credentials file created: {CREDENTIALS_FILE}")
