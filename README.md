@@ -2,6 +2,12 @@
 
 CLI tool for querying Splunk logs.
 
+## Install
+
+```bash
+uv tool install splank
+```
+
 ## Setup
 
 ```bash
