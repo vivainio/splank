@@ -11,7 +11,7 @@ from platformdirs import user_config_dir
 
 from splank.client import SplunkClient
 
-CONFIG_DIR = Path(user_config_dir("splank"))
+CONFIG_DIR = Path(user_config_dir("splank", appauthor=False))
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.toml"
 
 
