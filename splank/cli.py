@@ -4,6 +4,7 @@ import argparse
 import csv
 import fnmatch
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -27,6 +28,20 @@ def truncate_fields(row: dict, width: int | None) -> dict:
     for k, v in row.items():
         s = str(v)
         result[k] = s[:width] + "..." if len(s) > width else v
+    return result
+
+
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+
+
+def sanitize_fields(row: dict) -> dict:
+    """Mask email addresses in all string field values."""
+    result = {}
+    for k, v in row.items():
+        if isinstance(v, str):
+            result[k] = _EMAIL_RE.sub("***@***.***", v)
+        else:
+            result[k] = v
     return result
 
 
@@ -188,6 +203,8 @@ def cmd_search(args: argparse.Namespace) -> None:
             row = filter_internal_fields(row)
         if args.width:
             row = truncate_fields(row, args.width)
+        if not args.no_sanitize:
+            row = sanitize_fields(row)
         return row
 
     # Single profile: use streaming if appropriate
@@ -545,6 +562,11 @@ def main() -> None:
         "-z",
         action="store_true",
         help="Parse JSON from _raw and output as toon (ignores other fields)",
+    )
+    search_parser.add_argument(
+        "--no-sanitize",
+        action="store_true",
+        help="Disable masking of sensitive data (email addresses) in output",
     )
     search_parser.set_defaults(func=cmd_search)
 
