@@ -497,23 +497,26 @@ def cmd_jobs(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="splank",
-        description="CLI tool for querying Splunk logs",
-    )
-    parser.add_argument(
-        "-V",
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
-    parser.add_argument(
+    profile_parent = argparse.ArgumentParser(add_help=False)
+    profile_parent.add_argument(
         "-p",
         "--profile",
         action="append",
         dest="profiles",
         metavar="PROFILE",
         help="Splunk profile to use (repeatable for parallel search)",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="splank",
+        description="CLI tool for querying Splunk logs",
+        parents=[profile_parent],
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -523,7 +526,7 @@ def main() -> None:
     init_parser.set_defaults(func=cmd_init)
 
     # search command
-    search_parser = subparsers.add_parser("search", help="Execute SPL query")
+    search_parser = subparsers.add_parser("search", help="Execute SPL query", parents=[profile_parent])
     search_parser.add_argument("query", help="SPL query to execute")
     search_parser.add_argument(
         "--earliest", "-e", default="-24h", help="Earliest time (default: -24h)"
@@ -572,7 +575,7 @@ def main() -> None:
 
     # discover command
     discover_parser = subparsers.add_parser(
-        "discover", help="Discover available indexes"
+        "discover", help="Discover available indexes", parents=[profile_parent]
     )
     discover_parser.add_argument(
         "patterns",
@@ -591,14 +594,14 @@ def main() -> None:
     discover_parser.set_defaults(func=cmd_discover)
 
     # jobs command
-    jobs_parser = subparsers.add_parser("jobs", help="List search jobs")
+    jobs_parser = subparsers.add_parser("jobs", help="List search jobs", parents=[profile_parent])
     jobs_parser.add_argument(
         "--mine", action="store_true", help="Show only my jobs"
     )
     jobs_parser.set_defaults(func=cmd_jobs)
 
     # clear command
-    clear_parser = subparsers.add_parser("clear", help="Clear my search jobs")
+    clear_parser = subparsers.add_parser("clear", help="Clear my search jobs", parents=[profile_parent])
     clear_parser.set_defaults(func=cmd_clear)
 
     args = parser.parse_args()
