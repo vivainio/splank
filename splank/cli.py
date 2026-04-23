@@ -510,7 +510,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="splank",
         description="CLI tool for querying Splunk logs",
-        parents=[profile_parent],
     )
     parser.add_argument(
         "-V",
