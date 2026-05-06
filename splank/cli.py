@@ -8,7 +8,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from toon_format import encode as toon_encode
+from splank._vendor.toon_format import encode as toon_encode
 from typing import Iterator
 
 from splank import __version__
