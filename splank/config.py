@@ -14,9 +14,20 @@ from splank.client import SplunkClient
 CONFIG_DIR = Path(user_config_dir("splank", appauthor=False))
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.toml"
 
+# Old path used before the appauthor=False fix (Windows had an extra splank\ level)
+_LEGACY_CREDENTIALS_FILE = Path(user_config_dir("splank")) / "credentials.toml"
+
+
+def _migrate_legacy_credentials() -> None:
+    if not CREDENTIALS_FILE.exists() and _LEGACY_CREDENTIALS_FILE.exists():
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_LEGACY_CREDENTIALS_FILE, CREDENTIALS_FILE)
+        print(f"Migrated credentials from {_LEGACY_CREDENTIALS_FILE} to {CREDENTIALS_FILE}", file=sys.stderr)
+
 
 def load_credentials() -> dict:
     """Load credentials from $XDG_CONFIG_HOME/splank/credentials.toml."""
+    _migrate_legacy_credentials()
     if not CREDENTIALS_FILE.exists():
         return {}
 
