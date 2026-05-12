@@ -18,7 +18,7 @@ This creates `~/.config/splank/credentials.toml` with your Splunk credentials.
 
 ### Configuration
 
-The credentials file supports multiple profiles:
+The credentials file supports multiple profiles. Each profile authenticates either with a Splunk auth `token` (HTTP `Authorization: Bearer …`) or with `username` + `password` — set one or the other:
 
 ```toml
 default_profile = "prod"
