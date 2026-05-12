@@ -7,6 +7,7 @@ import json
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import parse_qs, urlparse
 
 from splank._vendor.toon_format import encode as toon_encode
 from typing import Iterator
@@ -190,8 +191,44 @@ def _search_one_profile(
     return profile, results
 
 
+def parse_splunk_url(value: str) -> tuple[str, str | None, str | None] | None:
+    """If value is a Splunk search URL, extract (query, earliest, latest).
+
+    Returns None if value isn't a recognizable Splunk URL with a `q` param.
+    """
+    if not value.startswith(("http://", "https://")):
+        return None
+    parsed = urlparse(value)
+    params = parse_qs(parsed.query)
+    q_list = params.get("q")
+    if not q_list:
+        return None
+    query = q_list[0]
+    # Splunk URLs typically prefix the SPL with "search "; strip it so the
+    # resulting query works whether the user later edits it or not.
+    if query.startswith("search "):
+        query = query[len("search "):]
+    earliest = params.get("earliest", [None])[0]
+    latest = params.get("latest", [None])[0]
+    return query, earliest, latest
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     """Execute a search query."""
+    parsed_url = parse_splunk_url(args.query)
+    if parsed_url is not None:
+        query, url_earliest, url_latest = parsed_url
+        args.query = query
+        # URL time range wins unless user explicitly overrode the default.
+        if url_earliest and args.earliest == "-24h":
+            args.earliest = url_earliest
+        if url_latest and args.latest == "now":
+            args.latest = url_latest
+        print(
+            f"Parsed URL: query={args.query!r} earliest={args.earliest} latest={args.latest}",
+            file=sys.stderr,
+        )
+
     profiles = args.profiles or [None]  # None = use default profile
     use_streaming = args.format == "table" and not args.output and len(profiles) == 1
 
