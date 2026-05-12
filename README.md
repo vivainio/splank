@@ -46,6 +46,9 @@ splank search 'index=main Level=ERROR' -m 10
 # Search using specific profile
 splank -p qa search 'index=main Level=ERROR'
 
+# Paste a Splunk web UI URL directly — query and time range are extracted
+splank search 'https://splunk.example.com/en-US/app/search/search?q=search%20index%3Dmain&earliest=-30d%40d&latest=now'
+
 # Discover indexes
 splank discover 'web*'
 
