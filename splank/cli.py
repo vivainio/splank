@@ -541,12 +541,16 @@ def main() -> None:
         action="append",
         dest="profiles",
         metavar="PROFILE",
+        # SUPPRESS so an absent -p on the subparser doesn't clobber a value
+        # given before the subcommand (argparse subparser default behavior).
+        default=argparse.SUPPRESS,
         help="Splunk profile to use (repeatable for parallel search)",
     )
 
     parser = argparse.ArgumentParser(
         prog="splank",
         description="CLI tool for querying Splunk logs",
+        parents=[profile_parent],
     )
     parser.add_argument(
         "-V",
@@ -641,6 +645,10 @@ def main() -> None:
     clear_parser.set_defaults(func=cmd_clear)
 
     args = parser.parse_args()
+
+    # SUPPRESS leaves profiles unset when -p is never given; normalize it.
+    if not hasattr(args, "profiles"):
+        args.profiles = None
 
     if not args.command:
         parser.print_help()
