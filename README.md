@@ -76,6 +76,38 @@ splank clear
 - `discover` - Discover available indexes
 - `jobs` - List search jobs
 - `clear` - Clear my search jobs
+- `mcp` - Interact with a Splunk MCP server (see below)
+
+## MCP
+
+Splunk instances can expose an [MCP](https://modelcontextprotocol.io) server at a URL like
+`https://<host>/en-US/splunkd/__raw/services/mcp`. This is separate from the regular management-port
+REST API, and typically needs its own bearer token — a plain Splunk API token is usually rejected
+because its audience doesn't match what the MCP endpoint expects.
+
+```bash
+# Save the MCP URL and token for a profile (prompts if omitted)
+splank -p qa mcp set https://splunk-qa.example.com/en-US/splunkd/__raw/services/mcp <token>
+
+# List the tools the server exposes
+splank -p qa mcp tools
+
+# Call a tool (arguments as key=value; values are parsed as JSON when possible)
+splank -p qa mcp call splunk_get_info
+splank -p qa mcp call splunk_run_query 'query=search index=main | head 5' row_limit=5
+```
+
+This adds `mcp_url` and `mcp_token` to the profile's TOML block, alongside its existing `host`/`token`:
+
+```toml
+[profiles.qa]
+host = "splunk-qa.example.com"
+port = 8089
+token = "your-token-here"
+verify_ssl = true
+mcp_url = "https://splunk-qa.example.com/en-US/splunkd/__raw/services/mcp"
+mcp_token = "your-mcp-scoped-token"
+```
 
 ## Search Options
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from platformdirs import user_config_dir
 
 from splank.client import SplunkClient
+from splank.mcp_client import MCPClient
 
 CONFIG_DIR = Path(user_config_dir("splank", appauthor=False))
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.toml"
@@ -95,6 +96,32 @@ def get_client(profile: str | None = None) -> SplunkClient:
     )
     client.login()
     return client
+
+
+def get_mcp_client(profile: str | None = None) -> MCPClient:
+    """Load credentials and create an MCP client for the profile's MCP server.
+
+    Args:
+        profile: Profile name (e.g., 'qa', 'prod'). If None, uses default profile.
+    """
+    creds = get_profile(profile)
+
+    mcp_url = creds.get("mcp_url")
+    if not mcp_url:
+        print(
+            "'mcp_url' is not set for this profile.",
+            file=sys.stderr,
+        )
+        print(
+            "Run 'splank mcp set <url> <token>' to configure it.", file=sys.stderr
+        )
+        sys.exit(1)
+
+    return MCPClient(
+        url=mcp_url,
+        token=creds.get("mcp_token"),
+        verify_ssl=creds.get("verify_ssl", True),
+    )
 
 
 def init_config() -> None:
@@ -198,6 +225,56 @@ def _set_default_profile(name: str) -> None:
     else:
         text = f'default_profile = "{name}"\n\n' + text
     CREDENTIALS_FILE.write_text(text)
+
+
+def resolve_profile_name(profile: str | None = None) -> str:
+    """Resolve the profile name to operate on: given name, else default_profile."""
+    creds = load_credentials()
+    name = profile or creds.get("default_profile")
+    if not name:
+        print("No profile specified and no default_profile configured.", file=sys.stderr)
+        print("Specify one with -p/--profile.", file=sys.stderr)
+        sys.exit(1)
+    return name
+
+
+def set_mcp_config(name: str, mcp_url: str, mcp_token: str) -> None:
+    """Add or update the mcp_url/mcp_token keys of an existing profile in place.
+
+    Preserves every other key already in the profile's TOML block.
+    """
+    if not CREDENTIALS_FILE.exists():
+        print(f"No credentials file at {CREDENTIALS_FILE}. Run 'splank init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    creds = load_credentials()
+    profiles = creds.get("profiles", {})
+    if name not in profiles:
+        print(f"Profile '{name}' not found in {CREDENTIALS_FILE}", file=sys.stderr)
+        print(f"Available profiles: {', '.join(profiles.keys()) or '(none)'}", file=sys.stderr)
+        sys.exit(1)
+
+    text = CREDENTIALS_FILE.read_text()
+    pattern = re.compile(
+        rf"^\[profiles\.{re.escape(name)}\]\n((?:(?!^\[).*\n?)*)",
+        re.MULTILINE,
+    )
+    match = pattern.search(text)
+    if not match:
+        print(f"Could not locate [profiles.{name}] block in {CREDENTIALS_FILE}", file=sys.stderr)
+        sys.exit(1)
+
+    block_body = match.group(1)
+    block_body = re.sub(r"^mcp_url\s*=.*\n?", "", block_body, flags=re.MULTILINE)
+    block_body = re.sub(r"^mcp_token\s*=.*\n?", "", block_body, flags=re.MULTILINE)
+    block_body = block_body.rstrip("\n") + "\n"
+    block_body += f"mcp_url = {_toml_str(mcp_url)}\n"
+    block_body += f"mcp_token = {_toml_str(mcp_token)}\n"
+
+    new_block = f"[profiles.{name}]\n{block_body}"
+    text = text[: match.start()] + new_block + text[match.end():]
+    CREDENTIALS_FILE.write_text(text)
+    CREDENTIALS_FILE.chmod(0o600)
 
 
 def add_profile_wizard(name: str | None = None, host: str | None = None) -> None:

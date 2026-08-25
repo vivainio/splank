@@ -13,7 +13,14 @@ from splank._vendor.toon_format import encode as toon_encode
 from typing import Iterator
 
 from splank import __version__
-from splank.config import add_profile_wizard, get_client, init_config
+from splank.config import (
+    add_profile_wizard,
+    get_client,
+    get_mcp_client,
+    init_config,
+    resolve_profile_name,
+    set_mcp_config,
+)
 
 # Internal Splunk fields to drop by default (keep _time and _raw)
 INTERNAL_FIELDS = {"_bkt", "_cd", "_indextime", "_serial", "_sourcetype", "_subsecond"}
@@ -536,6 +543,73 @@ def cmd_jobs(args: argparse.Namespace) -> None:
     print(f"\nTotal: {total_mb:.1f}MB")
 
 
+def cmd_mcp_set(args: argparse.Namespace) -> None:
+    """Save an MCP server URL and token into a profile's TOML block."""
+    name = resolve_profile_name(get_single_profile(args))
+
+    url = args.url or input("MCP server URL: ").strip()
+    if not url:
+        print("MCP server URL is required.", file=sys.stderr)
+        sys.exit(1)
+
+    token = args.token or input("MCP bearer token: ").strip()
+    if not token:
+        print("MCP token is required.", file=sys.stderr)
+        sys.exit(1)
+
+    set_mcp_config(name, url, token)
+    print(f"Saved mcp_url/mcp_token for profile '{name}'.")
+
+
+def cmd_mcp_tools(args: argparse.Namespace) -> None:
+    """List tools exposed by the profile's MCP server."""
+    client = get_mcp_client(get_single_profile(args))
+    tools = client.list_tools()
+    if not tools:
+        print("No tools found.")
+        return
+    for tool in tools:
+        print(f"{tool['name']}: {tool.get('description', '')}")
+
+
+def _parse_tool_arg_value(value: str):
+    """Parse a tool argument value, falling back to a raw string."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def cmd_mcp_call(args: argparse.Namespace) -> None:
+    """Call an MCP tool by name with key=value arguments."""
+    client = get_mcp_client(get_single_profile(args))
+
+    arguments: dict = {}
+    for pair in args.args:
+        if "=" not in pair:
+            print(f"Error: argument {pair!r} is not in key=value form", file=sys.stderr)
+            sys.exit(1)
+        key, value = pair.split("=", 1)
+        arguments[key] = _parse_tool_arg_value(value)
+
+    result = client.call_tool(args.tool, arguments)
+
+    if args.format == "json":
+        print(json.dumps(result, indent=2))
+        return
+
+    # Default: print text content blocks as-is, fall back to full result.
+    content = result.get("content")
+    if content:
+        for block in content:
+            if block.get("type") == "text":
+                print(block["text"])
+            else:
+                print(json.dumps(block, indent=2))
+    else:
+        print(json.dumps(result, indent=2))
+
+
 def main() -> None:
     profile_parent = argparse.ArgumentParser(add_help=False)
     profile_parent.add_argument(
@@ -652,6 +726,41 @@ def main() -> None:
     # clear command
     clear_parser = subparsers.add_parser("clear", help="Clear my search jobs", parents=[profile_parent])
     clear_parser.set_defaults(func=cmd_clear)
+
+    # mcp command group
+    mcp_parser = subparsers.add_parser("mcp", help="Interact with a Splunk MCP server")
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", help="MCP subcommands")
+
+    mcp_set_parser = mcp_subparsers.add_parser(
+        "set", help="Save MCP server URL and token for a profile", parents=[profile_parent]
+    )
+    mcp_set_parser.add_argument("url", nargs="?", help="MCP server URL")
+    mcp_set_parser.add_argument("token", nargs="?", help="Bearer token for the MCP server")
+    mcp_set_parser.set_defaults(func=cmd_mcp_set)
+
+    mcp_tools_parser = mcp_subparsers.add_parser(
+        "tools", help="List tools exposed by the MCP server", parents=[profile_parent]
+    )
+    mcp_tools_parser.set_defaults(func=cmd_mcp_tools)
+
+    mcp_call_parser = mcp_subparsers.add_parser(
+        "call", help="Call an MCP tool", parents=[profile_parent]
+    )
+    mcp_call_parser.add_argument("tool", help="Tool name")
+    mcp_call_parser.add_argument(
+        "args", nargs="*", help="Tool arguments as key=value pairs (values parsed as JSON when possible)"
+    )
+    mcp_call_parser.add_argument(
+        "--format", "-f", choices=["json", "text"], default="text", help="Output format (default: text)"
+    )
+    mcp_call_parser.set_defaults(func=cmd_mcp_call)
+
+    def cmd_mcp(args: argparse.Namespace) -> None:
+        if not args.mcp_command:
+            mcp_parser.print_help()
+            sys.exit(1)
+
+    mcp_parser.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args()
 
