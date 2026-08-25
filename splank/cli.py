@@ -13,7 +13,7 @@ from splank._vendor.toon_format import encode as toon_encode
 from typing import Iterator
 
 from splank import __version__
-from splank.config import get_client, init_config
+from splank.config import add_profile_wizard, get_client, init_config
 
 # Internal Splunk fields to drop by default (keep _time and _raw)
 INTERNAL_FIELDS = {"_bkt", "_cd", "_indextime", "_serial", "_sourcetype", "_subsecond"}
@@ -166,8 +166,11 @@ def get_single_profile(args: argparse.Namespace) -> str | None:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Initialize credentials file."""
-    init_config()
+    """Initialize credentials file, or add a single profile via a short wizard."""
+    if args.name:
+        add_profile_wizard(name=args.name, host=args.host)
+    else:
+        init_config()
 
 
 def _search_one_profile(
@@ -563,6 +566,12 @@ def main() -> None:
 
     # init command
     init_parser = subparsers.add_parser("init", help="Initialize credentials")
+    init_parser.add_argument(
+        "name", nargs="?", help="Profile name to add (e.g. qa) - runs a short wizard instead of opening an editor"
+    )
+    init_parser.add_argument(
+        "host", nargs="?", help="Splunk host for the profile (bare stack name ok, e.g. mystack)"
+    )
     init_parser.set_defaults(func=cmd_init)
 
     # search command

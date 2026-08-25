@@ -16,6 +16,15 @@ splank init
 
 This creates `~/.config/splank/credentials.toml` with your Splunk credentials.
 
+To add a single profile without opening an editor, pass a name (and optionally a host) instead:
+
+```bash
+splank init qa mystack   # bare stack names expand to <name>.splunkcloud.com
+splank init qa splunk-qa.example.com
+```
+
+This runs a short wizard (token only — it prompts just for the token), tests the connection before saving, and appends the profile to your existing credentials file (creating it if needed). It offers to overwrite if the name already exists, and to set the new profile as `default_profile`.
+
 ### Configuration
 
 The credentials file supports multiple profiles. Each profile authenticates either with a Splunk auth `token` (HTTP `Authorization: Bearer …`) or with `username` + `password` — set one or the other:
@@ -62,7 +71,7 @@ splank clear
 
 ## Commands
 
-- `init` - Create credentials file
+- `init` - Create credentials file, or `init <name> [host]` to add one profile via a short token-only wizard
 - `search` - Execute SPL query
 - `discover` - Discover available indexes
 - `jobs` - List search jobs

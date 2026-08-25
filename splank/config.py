@@ -1,6 +1,7 @@
 """Configuration handling for Splank."""
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -143,3 +144,149 @@ verify_ssl = true
         subprocess.run([editor, str(CREDENTIALS_FILE)])
     else:
         print("No editor found. Please edit the credentials file manually.")
+
+
+def _toml_str(value: str) -> str:
+    """Format a string as a quoted TOML basic string."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _expand_host(host: str) -> str:
+    """Expand a short Splunk Cloud stack name to its full hostname.
+
+    A bare stack name like 'mystack' has no dot, so it's assumed to be a
+    Splunk Cloud stack and expanded to '<stack>.splunkcloud.com'. Anything
+    with a dot already (or an IP) is left as-is.
+    """
+    host = host.strip()
+    if "." not in host:
+        return f"{host}.splunkcloud.com"
+    return host
+
+
+def _format_profile_block(name: str, cfg: dict) -> str:
+    lines = [
+        f"[profiles.{name}]",
+        f"host = {_toml_str(cfg['host'])}",
+        f"port = {cfg['port']}",
+        f"token = {_toml_str(cfg['token'])}",
+        f"verify_ssl = {'true' if cfg['verify_ssl'] else 'false'}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _remove_profile_block(text: str, name: str) -> str:
+    """Strip an existing [profiles.<name>] table (and its keys) from raw TOML text."""
+    pattern = re.compile(
+        rf"^\[profiles\.{re.escape(name)}\]\n(?:(?!^\[).*\n?)*",
+        re.MULTILINE,
+    )
+    return pattern.sub("", text)
+
+
+def _set_default_profile(name: str) -> None:
+    text = CREDENTIALS_FILE.read_text()
+    if re.search(r"^default_profile\s*=", text, re.MULTILINE):
+        text = re.sub(
+            r"^default_profile\s*=.*$",
+            f'default_profile = "{name}"',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    else:
+        text = f'default_profile = "{name}"\n\n' + text
+    CREDENTIALS_FILE.write_text(text)
+
+
+def add_profile_wizard(name: str | None = None, host: str | None = None) -> None:
+    """Interactively add (or replace) a single profile in the credentials file.
+
+    Args:
+        name: Profile name (e.g. 'qa'). Prompted for if not given.
+        host: Splunk host. A bare stack name (no dot) is expanded to
+            '<name>.splunkcloud.com'. Prompted for if not given.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    creds = load_credentials()
+    existing_profiles = set(creds.get("profiles", {}).keys())
+
+    if not name:
+        name = input("Profile name (e.g. qa, prod): ").strip()
+    if not name:
+        print("Profile name is required.", file=sys.stderr)
+        sys.exit(1)
+
+    if name in existing_profiles:
+        overwrite = input(f"Profile '{name}' already exists. Overwrite? [y/N]: ").strip().lower()
+        if overwrite != "y":
+            print("Aborted.")
+            return
+
+    if not host:
+        host = input("Splunk host (e.g. splunk.example.com, or a bare Splunk Cloud stack name): ").strip()
+    if not host:
+        print("Host is required.", file=sys.stderr)
+        sys.exit(1)
+    host = _expand_host(host)
+
+    port = 8089
+
+    token = input("Token: ").strip()
+    if not token:
+        print("Token is required.", file=sys.stderr)
+        sys.exit(1)
+
+    verify_ssl = True
+
+    profile_cfg = {
+        "host": host,
+        "port": port,
+        "token": token,
+        "verify_ssl": verify_ssl,
+    }
+
+    print(f"\nTesting connection to {host}:{port}...")
+    try:
+        client = SplunkClient(
+            host=host,
+            port=port,
+            token=token,
+            verify_ssl=verify_ssl,
+        )
+        client.login()
+        client.list_jobs(count=1)
+        print("Connection OK.")
+    except Exception as e:
+        print(f"Warning: could not verify connection ({e})", file=sys.stderr)
+        proceed = input("Save profile anyway? [y/N]: ").strip().lower()
+        if proceed != "y":
+            print("Aborted.")
+            return
+
+    block = _format_profile_block(name, profile_cfg)
+
+    if not CREDENTIALS_FILE.exists():
+        header = f'# Splank configuration\n\ndefault_profile = "{name}"\n\n'
+        CREDENTIALS_FILE.write_text(header + block)
+        CREDENTIALS_FILE.chmod(0o600)
+    else:
+        text = CREDENTIALS_FILE.read_text()
+        if name in existing_profiles:
+            text = _remove_profile_block(text, name)
+        text = text.rstrip() + "\n\n" + block
+        CREDENTIALS_FILE.write_text(text)
+        CREDENTIALS_FILE.chmod(0o600)
+
+    if name not in existing_profiles or "default_profile" not in creds:
+        make_default_prompt = True
+    else:
+        make_default_prompt = creds.get("default_profile") != name
+
+    if make_default_prompt:
+        make_default = input(f"Set '{name}' as default profile? [y/N]: ").strip().lower()
+        if make_default == "y":
+            _set_default_profile(name)
+
+    print(f"Profile '{name}' saved to {CREDENTIALS_FILE}")
