@@ -1,5 +1,6 @@
 """Splunk REST API client."""
 
+import base64
 import json
 import ssl
 import time
@@ -7,6 +8,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Iterator
+
+
+def decode_jwt_claims(token: str) -> dict | None:
+    """Best-effort decode of a JWT's claims, without verifying its signature.
+
+    Returns None if `token` doesn't look like a JWT (or can't be decoded).
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    # base64url needs padding restored to a multiple of 4.
+    payload += "=" * (-len(payload) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return None
 
 
 def get_ssl_context(verify: bool = True) -> ssl.SSLContext:
@@ -31,6 +49,7 @@ class SplunkClient:
         token: str | None = None,
         verify_ssl: bool = True,
     ):
+        self.host = host
         self.base_url = f"https://{host}:{port}"
         self.username = username
         self.password = password
@@ -66,7 +85,27 @@ class SplunkClient:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             error_body = e.read().decode()
+            if e.code == 401:
+                raise RuntimeError(f"HTTP 401: {error_body}{self._sso_hint()}")
             raise RuntimeError(f"HTTP {e.code}: {error_body}")
+
+    def _sso_hint(self) -> str:
+        """Suggest re-logging in via the browser if this looks like an expired SSO token."""
+        if not self.token:
+            return ""
+        claims = decode_jwt_claims(self.token)
+        if not claims:
+            return ""
+        # Splunk encodes the issuing identity provider in the `idp` claim.
+        # A locally-issued token has idp == "Splunk"; any other idp value
+        # means it was minted via some external SSO login flow.
+        idp = str(claims.get("idp") or "").lower()
+        if not idp or idp == "splunk":
+            return ""
+        return (
+            f"\nYour token is an SSO token, which may have expired. "
+            f"Try logging in at https://{self.host} in your browser and getting a fresh token."
+        )
 
     def login(self) -> None:
         """Authenticate and get session key."""
