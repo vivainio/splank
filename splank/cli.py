@@ -175,7 +175,7 @@ def get_single_profile(args: argparse.Namespace) -> str | None:
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize credentials file, or add a single profile via a short wizard."""
     if args.name:
-        add_profile_wizard(name=args.name, host=args.host)
+        add_profile_wizard(name=args.name, host=args.host, mcp=args.mcp)
     else:
         init_config()
 
@@ -543,6 +543,63 @@ def cmd_jobs(args: argparse.Namespace) -> None:
     print(f"\nTotal: {total_mb:.1f}MB")
 
 
+def _extract_spl(result: dict) -> str:
+    """Extract the generated SPL string from a saia_generate_spl tool result."""
+    response = None
+
+    structured = result.get("structuredContent")
+    if structured:
+        results = structured.get("results") or []
+        if results:
+            response = results[0].get("response")
+
+    if response is None:
+        for block in result.get("content") or []:
+            if block.get("type") != "text":
+                continue
+            try:
+                parsed = json.loads(block["text"])
+                results = parsed.get("results") or []
+                response = results[0].get("response") if results else block["text"]
+            except json.JSONDecodeError:
+                response = block["text"]
+            break
+
+    if isinstance(response, list):
+        response = "\n".join(response)
+    if not response:
+        raise RuntimeError("Could not extract SPL from saia_generate_spl response")
+
+    # Strip a leading/trailing markdown code fence if present. SAIA doesn't
+    # always emit a matched ``` pair (sometimes only the opening fence), so
+    # strip each end independently rather than requiring a full block match.
+    lines = response.strip().splitlines()
+    first_line = lines[0].strip() if lines else ""
+    if first_line.startswith("```") or first_line.lower() == "splunk-spl":
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def cmd_ask(args: argparse.Namespace) -> None:
+    """Generate SPL from a free-form question via the MCP server, then run it."""
+    profile = get_single_profile(args)
+    client = get_mcp_client(profile)
+    result = client.call_tool(
+        "saia_generate_spl", {"prompt": args.question, "spl_only": True}
+    )
+    spl = _extract_spl(result)
+
+    print(f"Generated SPL: {spl}", file=sys.stderr)
+
+    if args.dry_run:
+        return
+
+    args.query = spl
+    cmd_search(args)
+
+
 def cmd_mcp_set(args: argparse.Namespace) -> None:
     """Save an MCP server URL and token into a profile's TOML block."""
     name = resolve_profile_name(get_single_profile(args))
@@ -646,36 +703,40 @@ def main() -> None:
     init_parser.add_argument(
         "host", nargs="?", help="Splunk host for the profile (bare stack name ok, e.g. mystack)"
     )
+    init_parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Also set up the MCP server for this profile (derives the URL from host, prompts for its token)",
+    )
     init_parser.set_defaults(func=cmd_init)
 
     # search command
-    search_parser = subparsers.add_parser("search", help="Execute SPL query", parents=[profile_parent])
-    search_parser.add_argument("query", help="SPL query to execute")
-    search_parser.add_argument(
+    search_options_parent = argparse.ArgumentParser(add_help=False)
+    search_options_parent.add_argument(
         "--earliest", "-e", default="-24h", help="Earliest time (default: -24h)"
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--latest", "-l", default="now", help="Latest time (default: now)"
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--max-results", "-m", type=int, default=100, help="Max results (default: 100)"
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--format",
         "-f",
         choices=["json", "csv", "table", "toon"],
         default="toon",
         help="Output format (default: toon)",
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--output", "-o", help="Output file (default: stdout)"
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--internal",
         action="store_true",
         help="Include internal Splunk fields (_bkt, _cd, etc.)",
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--width",
         "-w",
         type=int,
@@ -683,18 +744,35 @@ def main() -> None:
         metavar="N",
         help="Truncate field values to N chars (default: 500, 0=no limit)",
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--zoom",
         "-z",
         action="store_true",
         help="Parse JSON from _raw and output as toon (ignores other fields)",
     )
-    search_parser.add_argument(
+    search_options_parent.add_argument(
         "--no-sanitize",
         action="store_true",
         help="Disable masking of sensitive data (email addresses) in output",
     )
+
+    search_parser = subparsers.add_parser(
+        "search", help="Execute SPL query", parents=[profile_parent, search_options_parent]
+    )
+    search_parser.add_argument("query", help="SPL query to execute")
     search_parser.set_defaults(func=cmd_search)
+
+    # ask command: free-form question -> SAIA-generated SPL -> search
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="Ask a free-form question; generates SPL via MCP/SAIA and runs it",
+        parents=[profile_parent, search_options_parent],
+    )
+    ask_parser.add_argument("question", help="Free-form natural-language question")
+    ask_parser.add_argument(
+        "--dry-run", action="store_true", help="Only print the generated SPL; don't run it"
+    )
+    ask_parser.set_defaults(func=cmd_ask)
 
     # discover command
     discover_parser = subparsers.add_parser(

@@ -277,13 +277,15 @@ def set_mcp_config(name: str, mcp_url: str, mcp_token: str) -> None:
     CREDENTIALS_FILE.chmod(0o600)
 
 
-def add_profile_wizard(name: str | None = None, host: str | None = None) -> None:
+def add_profile_wizard(name: str | None = None, host: str | None = None, mcp: bool = False) -> None:
     """Interactively add (or replace) a single profile in the credentials file.
 
     Args:
         name: Profile name (e.g. 'qa'). Prompted for if not given.
         host: Splunk host. A bare stack name (no dot) is expanded to
             '<name>.splunkcloud.com'. Prompted for if not given.
+        mcp: If True, also derive the MCP server URL from the host and
+            prompt for an MCP token, saving both to the profile.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     creds = load_credentials()
@@ -367,3 +369,12 @@ def add_profile_wizard(name: str | None = None, host: str | None = None) -> None
             _set_default_profile(name)
 
     print(f"Profile '{name}' saved to {CREDENTIALS_FILE}")
+
+    if mcp:
+        mcp_url = f"https://{host}/en-US/splunkd/__raw/services/mcp"
+        mcp_token = input(f"MCP bearer token for {mcp_url}: ").strip()
+        if not mcp_token:
+            print("No MCP token given; skipping MCP setup.", file=sys.stderr)
+            return
+        set_mcp_config(name, mcp_url, mcp_token)
+        print(f"Saved mcp_url/mcp_token for profile '{name}'.")

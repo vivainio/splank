@@ -77,6 +77,7 @@ splank clear
 - `jobs` - List search jobs
 - `clear` - Clear my search jobs
 - `mcp` - Interact with a Splunk MCP server (see below)
+- `ask` - Ask a free-form question; generates SPL via MCP/SAIA and runs it (see below)
 
 ## MCP
 
@@ -86,7 +87,11 @@ REST API, and typically needs its own bearer token — a plain Splunk API token 
 because its audience doesn't match what the MCP endpoint expects.
 
 ```bash
-# Save the MCP URL and token for a profile (prompts if omitted)
+# Set up a new profile with MCP in one go: derives the MCP URL from the host
+# and only prompts for the MCP token
+splank init qa splunk-qa.example.com --mcp
+
+# Or add MCP to an existing profile (prompts if url/token omitted)
 splank -p qa mcp set https://splunk-qa.example.com/en-US/splunkd/__raw/services/mcp <token>
 
 # List the tools the server exposes
@@ -107,6 +112,20 @@ token = "your-token-here"
 verify_ssl = true
 mcp_url = "https://splunk-qa.example.com/en-US/splunkd/__raw/services/mcp"
 mcp_token = "your-mcp-scoped-token"
+```
+
+### Ask
+
+`ask` uses the MCP server's `saia_generate_spl` tool (Splunk AI Assistant) to turn a free-form
+question into SPL, prints the generated query, and then runs it through the same pipeline as
+`search` — so all of `search`'s options (`--format`, `--earliest`/`--latest`, `--zoom`, etc.) apply.
+
+This requires the profile's `mcp_url`/`mcp_token` to already be configured (see [MCP](#mcp) above,
+`splank mcp set`) — `ask` connects to that same MCP server to generate the SPL.
+
+```bash
+splank -p qa ask "show me recent errors in web_logs"
+splank -p qa ask "find failed logins" --dry-run   # only print the generated SPL, don't run it
 ```
 
 ## Search Options
