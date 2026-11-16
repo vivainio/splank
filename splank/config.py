@@ -158,12 +158,12 @@ def get_o11y_client(profile: str | None = None) -> O11yClient:
     )
 
 
-def get_o11y_mcp_client(profile: str | None = None) -> MCPClient:
+def get_o11y_mcp_client(profile: str | None = None, toolsets: str | None = None) -> MCPClient:
     """Create a client for the Splunk Observability Cloud MCP gateway.
 
     Uses ``o11y_realm`` and ``o11y_token``; the gateway URL is derived from the realm
     unless the profile sets ``o11y_mcp_url``. ``o11y_mcp_toolsets`` (comma-separated)
-    selects extra toolsets beyond the server default.
+    selects extra toolsets beyond the server default; ``toolsets`` overrides it for one call.
     """
     creds = get_profile(profile)
     token = creds.get("o11y_token")
@@ -175,8 +175,9 @@ def get_o11y_mcp_client(profile: str | None = None) -> MCPClient:
 
     url = creds.get("o11y_mcp_url") or mcp_url_for_realm(realm)
     headers = {"X-SF-REALM": realm, "X-SF-TOKEN": token}
-    if creds.get("o11y_mcp_toolsets"):
-        headers["X-SPLUNK-O11Y-TOOL-SETS"] = str(creds["o11y_mcp_toolsets"])
+    selected = toolsets or creds.get("o11y_mcp_toolsets")
+    if selected:
+        headers["X-SPLUNK-O11Y-TOOL-SETS"] = str(selected)
     return MCPClient(
         url=url, token=token, verify_ssl=creds.get("verify_ssl", True), headers=headers
     )

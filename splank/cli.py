@@ -12,11 +12,15 @@ from urllib.parse import parse_qs, urlparse
 from splank._vendor.toon_format import encode as toon_encode
 from splank.o11y_client import (
     apm_environments,
+    build_tool_arguments,
     compare_windows,
+    describe_fields,
     exemplar_traces,
     parse_duration_ms,
     parse_time_ms,
     parse_window,
+    resolve_tool,
+    tool_inputs,
 )
 from typing import Iterator
 
@@ -739,6 +743,72 @@ def cmd_o11y_services(args: argparse.Namespace) -> None:
     _output_o11y(items[: args.limit], args)
 
 
+def cmd_o11y_tools(args: argparse.Namespace) -> None:
+    """List the tools the Observability MCP gateway exposes, or describe one."""
+    mcp = get_o11y_mcp_client(get_single_profile(args), args.toolsets)
+    tools = mcp.list_tools()
+
+    if args.name:
+        try:
+            tool = resolve_tool(tools, args.name)
+        except RuntimeError:
+            tool = None
+        if tool:  # exact match: show its description and input fields
+            _, props, required = tool_inputs(tool)
+            print(f"{tool['name']}\n")
+            print((tool.get("description") or "(no description)").strip() + "\n")
+            _output_o11y(describe_fields(props, required), args)
+            return
+
+    needle = (args.name or "").lower()
+    rows = [
+        {
+            "tool": t["name"],
+            "description": " ".join((t.get("description") or "").split())[:110],
+        }
+        for t in sorted(tools, key=lambda t: t["name"])
+        if needle in t["name"].lower() or needle in (t.get("description") or "").lower()
+    ]
+    if not rows:
+        print(f"No tools match {args.name!r}.", file=sys.stderr)
+        return
+    _output_o11y(rows, args)
+
+
+def cmd_o11y_tool(args: argparse.Namespace) -> None:
+    """Call any Observability MCP tool: key=value arguments, dotted keys nest."""
+    mcp = get_o11y_mcp_client(get_single_profile(args), args.toolsets)
+    tool = resolve_tool(mcp.list_tools(), args.tool)
+    try:
+        arguments = build_tool_arguments(tool, args.args, args.json_args)
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    result = mcp.call_tool(tool["name"], arguments)
+    texts = [b.get("text", "") for b in result.get("content") or [] if b.get("type") == "text"]
+    text = "\n".join(texts)
+    if result.get("isError") or text.startswith("Invalid arguments"):
+        _, props, required = tool_inputs(tool)
+        print(f"Error from {tool['name']}: {text or 'tool reported an error'}", file=sys.stderr)
+        print(f"Run 'splank oy tools {args.tool}' to see its fields.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        print(text if text else json.dumps(result, indent=2))
+        return
+    if args.raw:
+        print(text)
+    elif args.format == "json":
+        output_json(data, args.output)
+    elif args.format == "csv":
+        output_csv(data if isinstance(data, list) else [data], args.output)
+    else:
+        output_toon(data, args.output)
+
+
 def cmd_o11y_envs(args: argparse.Namespace) -> None:
     """List APM environments (via the Observability MCP gateway)."""
     mcp = get_o11y_mcp_client(get_single_profile(args))
@@ -1169,6 +1239,33 @@ def main() -> None:
         "--type", help="Only nodes of this type (service, database, pubsub)"
     )
     o11y_svc_parser.set_defaults(func=cmd_o11y_services)
+
+    o11y_tools_parser = o11y_subparsers.add_parser(
+        "tools",
+        help="List the tools of the Observability MCP gateway, or show one tool's fields",
+        parents=[profile_parent, o11y_options_parent],
+    )
+    o11y_tools_parser.add_argument(
+        "name", nargs="?", help="Tool name to describe, or text to filter the list by"
+    )
+    o11y_tools_parser.add_argument(
+        "--toolsets", help="Comma-separated extra toolsets to expose (e.g. apm,detectors; see 'oy tool list_mcp_toolsets')"
+    )
+    o11y_tools_parser.set_defaults(func=cmd_o11y_tools)
+
+    o11y_tool_parser = o11y_subparsers.add_parser(
+        "tool",
+        help="Call any tool of the Observability MCP gateway directly",
+        parents=[profile_parent, o11y_options_parent],
+    )
+    o11y_tool_parser.add_argument("tool", help="Tool name (the 'o11y_' prefix is optional)")
+    o11y_tool_parser.add_argument(
+        "args", nargs="*", help="Arguments as key=value; dotted keys nest (time_range.start=-1h); values parsed as JSON when possible"
+    )
+    o11y_tool_parser.add_argument("--json", dest="json_args", help="Arguments as a JSON object (key=value pairs override it)")
+    o11y_tool_parser.add_argument("--toolsets", help="Comma-separated extra toolsets to expose for this call")
+    o11y_tool_parser.add_argument("--raw", action="store_true", help="Print the tool's text result unchanged")
+    o11y_tool_parser.set_defaults(func=cmd_o11y_tool)
 
     o11y_envs_parser = o11y_subparsers.add_parser(
         "envs", help="List APM environments", parents=[profile_parent, o11y_options_parent]

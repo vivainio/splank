@@ -315,7 +315,8 @@ def _series_labels(props: dict) -> dict:
     labels = {"label": props.get("sf_streamLabel"), "metric": props.get("sf_originatingMetric")}
     dims = list(props.get("sf_key", [])) + list(props.get("sf_singletonFixedDimensions", []))
     for key in dims:
-        if key.startswith("sf_") or key == "computationId" or key not in props:
+        # Skip SignalFlow's own bookkeeping, but keep real dimensions that happen to start with sf_ (sf_service, ...).
+        if key in ("sf_metric", "sf_originatingMetric", "computationId") or key not in props:
             continue
         labels[key] = props[key]
     return {k: v for k, v in labels.items() if v is not None}
@@ -400,3 +401,90 @@ def exemplar_traces(
     if data.get("warning"):
         status = {**status, "warning": data["warning"]}
     return rows, status
+
+
+# ---------------------------------------------------------------------------
+# Generic access to every Observability MCP tool
+# ---------------------------------------------------------------------------
+
+
+def resolve_tool(tools: list[dict], name: str) -> dict:
+    """Find a tool by exact name, with or without the gateway's ``o11y_`` prefix."""
+    by_name = {t["name"]: t for t in tools}
+    for candidate in (name, MCP_TOOL_PREFIX + name):
+        if candidate in by_name:
+            return by_name[candidate]
+    close = sorted(n for n in by_name if name.lower() in n.lower())[:8]
+    hint = f" Did you mean: {', '.join(close)}?" if close else " Run 'splank oy tools' to list them."
+    raise RuntimeError(f"Unknown tool {name!r}.{hint}")
+
+
+def tool_inputs(tool: dict) -> tuple[bool, dict, list[str]]:
+    """Return (wrapped, properties, required) for a tool's inputs.
+
+    Gateway tools usually take a single ``params`` object; ``wrapped`` is True then and
+    ``properties``/``required`` describe the fields inside it, so callers can use them directly.
+    """
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") or {}
+    inner = props.get("params")
+    if set(props) == {"params"} and isinstance(inner, dict) and inner.get("properties") is not None:
+        return True, inner.get("properties") or {}, inner.get("required") or []
+    return False, props, schema.get("required") or []
+
+
+def describe_fields(props: dict, required: list[str] | None = None, prefix: str = "") -> list[dict]:
+    """Flatten a JSON-schema properties dict into rows (nested objects become dotted names)."""
+    rows = []
+    for key, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        name = f"{prefix}{key}"
+        kind = spec.get("type")
+        if kind is None and spec.get("anyOf"):
+            kind = "|".join(str(o.get("type")) for o in spec["anyOf"] if isinstance(o, dict))
+        desc = " ".join((spec.get("description") or "").split())
+        rows.append({
+            "field": name,
+            "type": kind,
+            "required": key in (required or []) if not prefix else None,
+            "default": spec.get("default"),
+            "description": desc[:160] + ("..." if len(desc) > 160 else ""),
+        })
+        if isinstance(spec.get("properties"), dict):
+            rows.extend(describe_fields(spec["properties"], spec.get("required"), prefix=name + "."))
+    return rows
+
+
+def _coerce(value: str):
+    """Parse a command-line value as JSON when possible, else keep the string."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def build_tool_arguments(tool: dict, pairs: list[str], json_args: str | None = None) -> dict:
+    """Build the ``arguments`` for tools/call from key=value pairs (dotted keys nest).
+
+    ``time_range.start=-1h`` becomes ``{"time_range": {"start": "-1h"}}``; values are JSON-decoded
+    when they parse (numbers, true/false, lists, objects). For gateway tools that wrap their inputs in
+    ``params`` the wrapper is added automatically. ``json_args`` supplies a base object that pairs override.
+    """
+    wrapped, _, _ = tool_inputs(tool)
+    args: dict = json.loads(json_args) if json_args else {}
+    if wrapped and set(args) == {"params"}:
+        args = args["params"]  # user already supplied the wrapper
+    if not isinstance(args, dict):
+        raise ValueError("--json must be a JSON object")
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise ValueError(f"argument {pair!r} is not in key=value form")
+        node = args
+        *parents, leaf = key.split(".")
+        for part in parents:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                raise ValueError(f"cannot set {key!r}: {part!r} is not an object")
+        node[leaf] = _coerce(value)
+    return {"params": args} if wrapped else args

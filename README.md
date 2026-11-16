@@ -123,6 +123,25 @@ in Google Cloud or GovCloud realms. It returns a small sample of traces per call
 and you should narrow `--earliest` or add filters. Pass a returned `traceId` to `oy trace`. Extra MCP toolsets can be
 selected with `o11y_mcp_toolsets = "apm,detectors"` on the profile.
 
+### Any Observability MCP tool
+
+Every tool the gateway exposes can be called directly; `splank` reads each tool's input schema from the server, so
+new tools and extra toolsets work without code changes.
+
+```bash
+splank -p obs oy tools                              # list the tools
+splank -p obs oy tools latency                      # filter by name/description
+splank -p obs oy tools get_apm_service_latency      # description and input fields of one tool
+splank -p obs oy tool get_apm_service_latency environment_name=prod service_name=checkout time_range.start=-1h
+splank -p obs oy tool list_mcp_toolsets             # which toolsets exist (apm, rum, logs, detectors, ...)
+splank -p obs oy tools --toolsets apm,detectors     # expose more tools for this call
+```
+
+Arguments are `key=value`; dotted keys nest (`time_range.start=-1h`) and values are parsed as JSON when possible
+(`limit=5`, `flag=true`, `tags_or_dimensions={"http.method":["POST"]}`). Use `--json '{...}'` for a whole object.
+The gateway's `params` wrapper and the `o11y_` name prefix are handled for you. Output is TOON by default
+(`-f json` / `--raw` for the tool's text unchanged).
+
 `oy incidents` filters: `--detector TEXT` (substring of the detector name), `--since`/`--until` (on the incident's
 last state change; only the newest ~10000 incidents are reachable through the API).
 
