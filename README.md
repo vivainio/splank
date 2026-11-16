@@ -77,16 +77,54 @@ splank clear
 - `jobs` - List search jobs
 - `clear` - Clear my search jobs
 - `mcp` - Interact with a Splunk MCP server (see below)
-- `oy` - Query Splunk Observability Cloud / SignalFx (see below)
+- `oy` - Query Splunk Observability Cloud / SignalFx: metrics, SignalFlow, detectors, incidents, APM services and traces (full command list below)
 - `ask` - Ask a free-form question; generates SPL via MCP/SAIA and runs it (see below)
 
 ## Observability Cloud (SignalFx)
 
-Splunk Observability Cloud (formerly SignalFx) uses its own API and its own token, separate from the
-Splunk `token` and `mcp_token`. Each profile can carry `o11y_realm` and `o11y_token`; a profile may
-hold only these (no Splunk `host`). Find the realm in your Observability URL
-(`https://app.<realm>.observability.splunkcloud.com`) and create an org access token or user API token
-in the UI.
+Splunk Observability Cloud (formerly SignalFx) is Splunk's metrics, traces and alerting platform. It is a
+separate product from the Splunk search you use with `search`: it has its own API and its own token,
+separate from the Splunk `token` and `mcp_token`. All of it lives under one command, `splank oy`.
+
+Each profile can carry `o11y_realm` and `o11y_token`; a profile may hold only these (no Splunk `host`).
+Find the realm in your Observability URL (`https://app.<realm>.observability.splunkcloud.com`) and create an
+org access token or user API token in the UI.
+
+### New to Observability Cloud? A few terms
+
+- **Realm**: the region your org lives in, such as `eu0` or `us1`. It's part of every API URL.
+- **Metric / MTS**: a metric is a named measurement (`cpu.utilization`). An MTS (metric time series) is one
+  metric with one combination of dimensions, such as `host=web-1`; a metric has many MTS.
+- **SignalFlow**: Observability's query language for metrics, such as
+  `data('cpu.utilization').mean(by=['host']).publish()`. A program must end in `.publish()` to produce output.
+- **Detector / incident**: a detector is an alert rule; an incident is one firing of it (active until it resolves).
+- **APM, service, trace, span**: APM monitors your applications. A service is an application component, a trace is
+  one request's path through services, and a span is one step in a trace. Environments (such as `prod`) group services.
+
+### Command reference
+
+Every command takes `-p PROFILE` and, where it prints results, `-f toon|json|csv`, `-o FILE` and `-n LIMIT`.
+Times accept `now`, relative values (`-1h`, `-7d`), epoch, or ISO 8601.
+
+| Area | Command | What it does |
+|---|---|---|
+| Setup | `oy set <realm> [token]` | Save the realm and token on a profile (creates it if needed) |
+| Metrics | `oy metrics [query]` | Search metric names, e.g. `'sf_metric:cpu*'` |
+| | `oy mts [query]` | Search metric time series metadata (which dimensions exist, and their values) |
+| | `oy query '<SignalFlow>'` | Run a SignalFlow program; one row per datapoint (`-e`, `-l`, `-r` for range and resolution) |
+| | `oy compare '<SignalFlow>'` | Compare a metric between a `--before` and an `--after` window per group, optionally `--focus` vs a control |
+| Alerting | `oy detectors [name]` | Search detectors (alert rules) by name |
+| | `oy incidents` | List incidents; `--resolved`, `--detector TEXT`, `--since`, `--until` |
+| APM | `oy envs` | List APM environments |
+| | `oy services [pattern]` | List APM services, or `--edges` for the dependencies between them |
+| | `oy traces <service>` | Find sample traces for a service (`--type error`, `--min-ms`, `--tag k=v`) |
+| | `oy trace <traceId>` | Download every span of a trace |
+| MCP gateway | `oy tools [name]` | List the tools of Splunk's Observability MCP gateway, or show one tool's fields |
+| | `oy tool <name> k=v ...` | Call any gateway tool (latency and error breakdowns, tag autocomplete, detector lookups, ...) |
+
+Typical flows: *what is alerting?* `oy incidents`; *what does this metric look like?* `oy metrics`, then `oy query`;
+*did a change help?* `oy compare`; *why was this service slow or failing?* `oy envs`, `oy traces`, `oy trace`,
+then `oy tool get_apm_service_latency ...`. Examples of each follow.
 
 ```bash
 splank -p obs oy set eu0 <token>      # creates the profile if it doesn't exist
