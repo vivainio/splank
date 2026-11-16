@@ -37,6 +37,19 @@ def get_ssl_context(verify: bool = True) -> ssl.SSLContext:
     return ctx
 
 
+def build_spl(query: str, max_results: int) -> str:
+    """Turn a user query into runnable SPL (add `search` prefix and a head limit)."""
+    if query.strip().startswith("|"):
+        spl = query
+    else:
+        spl = f"search {query}"
+
+    # Add head limit if not already present to reduce disk usage
+    if "| head" not in spl.lower():
+        spl = f"{spl} | head {max_results}"
+    return spl
+
+
 class SplunkClient:
     """Splunk REST API client."""
 
@@ -133,14 +146,7 @@ class SplunkClient:
     ) -> Iterator[dict]:
         """Execute a search query and return results."""
         # Build search query with head limit to reduce server-side processing
-        if query.strip().startswith("|"):
-            spl = query
-        else:
-            spl = f"search {query}"
-
-        # Add head limit if not already present to reduce disk usage
-        if "| head" not in spl.lower():
-            spl = f"{spl} | head {max_results}"
+        spl = build_spl(query, max_results)
 
         data = {
             "search": spl,

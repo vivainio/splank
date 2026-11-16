@@ -12,6 +12,7 @@ from platformdirs import user_config_dir
 
 from splank.client import SplunkClient
 from splank.mcp_client import MCPClient
+from splank.o11y_client import O11yClient, api_url_for_realm
 
 CONFIG_DIR = Path(user_config_dir("splank", appauthor=False))
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.toml"
@@ -73,13 +74,23 @@ def get_profile(profile: str | None = None) -> dict:
     sys.exit(1)
 
 
-def get_client(profile: str | None = None) -> SplunkClient:
-    """Load credentials and create authenticated client.
+def get_client(
+    profile: str | None = None, mcp: bool | None = None
+) -> SplunkClient | MCPClient:
+    """Load credentials and create a client able to run searches.
 
     Args:
         profile: Profile name (e.g., 'qa', 'prod'). If None, uses default profile.
+        mcp: True to search through the profile's MCP server, False to force the
+            REST API, None (default) to follow the profile's ``mode`` key
+            (``mode = "mcp"`` selects MCP, anything else selects REST).
     """
     creds = get_profile(profile)
+
+    if mcp is None:
+        mcp = str(creds.get("mode", "rest")).lower() == "mcp"
+    if mcp:
+        return get_mcp_client(profile)
 
     host = creds.get("host")
     if not host:
@@ -120,6 +131,29 @@ def get_mcp_client(profile: str | None = None) -> MCPClient:
     return MCPClient(
         url=mcp_url,
         token=creds.get("mcp_token"),
+        verify_ssl=creds.get("verify_ssl", True),
+    )
+
+
+def get_o11y_client(profile: str | None = None) -> O11yClient:
+    """Load credentials and create a Splunk Observability Cloud (SignalFx) client.
+
+    Uses ``o11y_token`` plus either ``o11y_realm`` (e.g. 'eu0') or an explicit
+    ``o11y_api_url`` override from the profile.
+    """
+    creds = get_profile(profile)
+
+    token = creds.get("o11y_token")
+    api_url = creds.get("o11y_api_url")
+    realm = creds.get("o11y_realm")
+    if not token or not (api_url or realm):
+        print("'o11y_realm' and 'o11y_token' are not set for this profile.", file=sys.stderr)
+        print("Run 'splank oy set <realm> <token>' to configure them.", file=sys.stderr)
+        sys.exit(1)
+
+    return O11yClient(
+        api_url=api_url or api_url_for_realm(realm),
+        token=token,
         verify_ssl=creds.get("verify_ssl", True),
     )
 
@@ -238,8 +272,8 @@ def resolve_profile_name(profile: str | None = None) -> str:
     return name
 
 
-def set_mcp_config(name: str, mcp_url: str, mcp_token: str) -> None:
-    """Add or update the mcp_url/mcp_token keys of an existing profile in place.
+def _set_profile_keys(name: str, values: dict[str, str]) -> None:
+    """Add or update string keys of an existing profile in place.
 
     Preserves every other key already in the profile's TOML block.
     """
@@ -265,16 +299,44 @@ def set_mcp_config(name: str, mcp_url: str, mcp_token: str) -> None:
         sys.exit(1)
 
     block_body = match.group(1)
-    block_body = re.sub(r"^mcp_url\s*=.*\n?", "", block_body, flags=re.MULTILINE)
-    block_body = re.sub(r"^mcp_token\s*=.*\n?", "", block_body, flags=re.MULTILINE)
+    for key in values:
+        block_body = re.sub(rf"^{re.escape(key)}\s*=.*\n?", "", block_body, flags=re.MULTILINE)
     block_body = block_body.rstrip("\n") + "\n"
-    block_body += f"mcp_url = {_toml_str(mcp_url)}\n"
-    block_body += f"mcp_token = {_toml_str(mcp_token)}\n"
+    for key, value in values.items():
+        block_body += f"{key} = {_toml_str(value)}\n"
 
     new_block = f"[profiles.{name}]\n{block_body}"
     text = text[: match.start()] + new_block + text[match.end():]
     CREDENTIALS_FILE.write_text(text)
     CREDENTIALS_FILE.chmod(0o600)
+
+
+def set_mcp_config(name: str, mcp_url: str, mcp_token: str) -> None:
+    """Add or update the mcp_url/mcp_token keys of an existing profile in place."""
+    _set_profile_keys(name, {"mcp_url": mcp_url, "mcp_token": mcp_token})
+
+
+def set_o11y_config(name: str, realm: str, token: str) -> None:
+    """Add or update the o11y_realm/o11y_token keys of a profile.
+
+    The Observability token is separate from the Splunk ``token``. If the
+    profile doesn't exist yet, an Observability-only profile (no Splunk host)
+    is created.
+    """
+    if name not in load_credentials().get("profiles", {}):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        block = (
+            f"[profiles.{name}]\n"
+            f"o11y_realm = {_toml_str(realm)}\n"
+            f"o11y_token = {_toml_str(token)}\n"
+        )
+        if CREDENTIALS_FILE.exists():
+            CREDENTIALS_FILE.write_text(CREDENTIALS_FILE.read_text().rstrip() + "\n\n" + block)
+        else:
+            CREDENTIALS_FILE.write_text(f'default_profile = "{name}"\n\n' + block)
+        CREDENTIALS_FILE.chmod(0o600)
+        return
+    _set_profile_keys(name, {"o11y_realm": realm, "o11y_token": token})
 
 
 def add_profile_wizard(name: str | None = None, host: str | None = None, mcp: bool = False) -> None:

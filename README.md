@@ -77,7 +77,46 @@ splank clear
 - `jobs` - List search jobs
 - `clear` - Clear my search jobs
 - `mcp` - Interact with a Splunk MCP server (see below)
+- `oy` - Query Splunk Observability Cloud / SignalFx (see below)
 - `ask` - Ask a free-form question; generates SPL via MCP/SAIA and runs it (see below)
+
+## Observability Cloud (SignalFx)
+
+Splunk Observability Cloud (formerly SignalFx) uses its own API and its own token, separate from the
+Splunk `token` and `mcp_token`. Each profile can carry `o11y_realm` and `o11y_token`; a profile may
+hold only these (no Splunk `host`). Find the realm in your Observability URL
+(`https://app.<realm>.observability.splunkcloud.com`) and create an org access token or user API token
+in the UI.
+
+```bash
+splank -p obs oy set eu0 <token>      # creates the profile if it doesn't exist
+
+splank -p obs oy metrics 'sf_metric:cpu*'
+splank -p obs oy mts 'sf_metric:cpu.utilization' -n 20
+splank -p obs oy detectors 'high latency'
+splank -p obs oy incidents --resolved -f json
+
+# SignalFlow: actual metric values (program must end in .publish())
+splank -p obs oy query "data('cpu.utilization').mean(by=['aws_region']).publish()" -e -1h -r 5m
+splank -p obs oy query "data('cpu.utilization', filter=filter('Application','web')).max().publish()" -f csv
+
+# APM: services, their dependencies, and a trace by ID
+splank -p obs oy services 'checkout*' --type service
+splank -p obs oy services 'checkout*' --edges
+splank -p obs oy trace d1a8f3e2d7d3700c -f json
+```
+
+`oy query` takes `-e/--earliest` and `-l/--latest` (`-1h`, `-30m`, `-7d`, `now`, epoch, or ISO 8601) and
+`-r/--resolution` (`1m`, `5m`, …). It prints one row per datapoint with `timestamp`, `value`, `label`, `metric`
+and the series' dimensions. `oy trace` downloads spans for a known trace ID; the public API has no trace
+search, so find IDs from your logs or the UI.
+
+```toml
+[profiles.obs]
+o11y_realm = "eu0"
+o11y_token = "your-observability-token"
+# o11y_api_url = "https://api.eu0.observability.splunkcloud.com"   # optional override
+```
 
 ## MCP
 
@@ -96,6 +135,7 @@ splank -p qa mcp set https://splunk-qa.example.com/en-US/splunkd/__raw/services/
 
 # List the tools the server exposes
 splank -p qa mcp tools
+splank -p qa mcp tools --schema   # also show each tool's input schema
 
 # Call a tool (arguments as key=value; values are parsed as JSON when possible)
 splank -p qa mcp call splunk_get_info
@@ -113,6 +153,35 @@ verify_ssl = true
 mcp_url = "https://splunk-qa.example.com/en-US/splunkd/__raw/services/mcp"
 mcp_token = "your-mcp-scoped-token"
 ```
+
+### Search via MCP
+
+`search`, `ask` and `discover` can run their queries through the MCP server instead of the management-port
+REST API — useful when port 8089 isn't reachable or the REST token has expired. Either pass `--mcp` for a
+single run, or set `mode = "mcp"` on the profile:
+
+```toml
+[profiles.qa]
+mode = "mcp"                      # search/ask/discover use the MCP server by default
+mcp_url = "https://splunk-qa.example.com/en-US/splunkd/__raw/services/mcp"
+mcp_token = "your-mcp-scoped-token"
+```
+
+```bash
+splank -p qa search 'index=main Level=ERROR' --mcp   # one-off
+splank -p qa search 'index=main Level=ERROR'         # uses MCP when mode = "mcp"
+splank -p qa search 'index=main Level=ERROR' --rest  # force REST on an mcp-mode profile
+```
+
+In MCP mode `host`/`token` are not needed. Queries run through the server's `splunk_run_query` tool, so
+all `search` options and output formats work, with these differences:
+
+- Results are not streamed; table output appears once the query finishes.
+- `--earliest`/`--latest` are sent as tool arguments if the tool accepts them (check with
+  `splank mcp tools --schema`); otherwise they are inlined into the SPL (`search earliest=… latest=… …`).
+  For queries starting with `|` this isn't possible, so put the time range in the SPL yourself.
+- `jobs` and `clear` always use the REST API (MCP has no job handles).
+- The MCP server may enforce its own row caps or command restrictions.
 
 ### Ask
 

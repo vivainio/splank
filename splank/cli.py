@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, urlparse
 
 from splank._vendor.toon_format import encode as toon_encode
+from splank.o11y_client import parse_duration_ms, parse_time_ms
 from typing import Iterator
 
 from splank import __version__
@@ -17,9 +18,11 @@ from splank.config import (
     add_profile_wizard,
     get_client,
     get_mcp_client,
+    get_o11y_client,
     init_config,
     resolve_profile_name,
     set_mcp_config,
+    set_o11y_config,
 )
 
 # Internal Splunk fields to drop by default (keep _time and _raw)
@@ -186,9 +189,10 @@ def _search_one_profile(
     earliest: str,
     latest: str,
     max_results: int,
+    mcp: bool | None = None,
 ) -> tuple[str | None, list[dict]]:
     """Execute search for a single profile, returning (profile, results)."""
-    client = get_client(profile)
+    client = get_client(profile, mcp)
     results = list(
         client.search(
             query=query,
@@ -256,7 +260,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
     # Single profile: use streaming if appropriate
     if len(profiles) == 1:
-        client = get_client(profiles[0])
+        client = get_client(profiles[0], args.mcp)
         results = client.search(
             query=args.query,
             earliest=args.earliest,
@@ -294,6 +298,7 @@ def cmd_search(args: argparse.Namespace) -> None:
                     args.earliest,
                     args.latest,
                     args.max_results,
+                    args.mcp,
                 ): p
                 for p in profiles
             }
@@ -332,7 +337,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 def cmd_clear(args: argparse.Namespace) -> None:
     """Clear search jobs to free quota."""
-    client = get_client(get_single_profile(args))
+    client = get_client(get_single_profile(args), mcp=False)
 
     # List user's jobs
     jobs = client.list_jobs(count=100)
@@ -360,7 +365,7 @@ def cmd_clear(args: argparse.Namespace) -> None:
 
 def cmd_discover(args: argparse.Namespace) -> None:
     """Discover available indexes via search."""
-    client = get_client(get_single_profile(args))
+    client = get_client(get_single_profile(args), args.mcp)
 
     # Use eventcount to discover all searchable indexes (including federated)
     print("Discovering indexes...", file=sys.stderr)
@@ -517,7 +522,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
 
 def cmd_jobs(args: argparse.Namespace) -> None:
     """List search jobs."""
-    client = get_client(get_single_profile(args))
+    client = get_client(get_single_profile(args), mcp=False)
 
     jobs = client.list_jobs(count=50)
 
@@ -600,6 +605,94 @@ def cmd_ask(args: argparse.Namespace) -> None:
     cmd_search(args)
 
 
+def cmd_o11y_set(args: argparse.Namespace) -> None:
+    """Save Observability Cloud realm and token into a profile's TOML block."""
+    name = resolve_profile_name(get_single_profile(args))
+
+    realm = args.realm or input("Observability realm (e.g. eu0, us1): ").strip()
+    if not realm:
+        print("Realm is required.", file=sys.stderr)
+        sys.exit(1)
+
+    token = args.token or input("Observability API token: ").strip()
+    if not token:
+        print("Token is required.", file=sys.stderr)
+        sys.exit(1)
+
+    set_o11y_config(name, realm, token)
+    print(f"Saved o11y_realm/o11y_token for profile '{name}'.")
+
+
+def _output_o11y(results: list[dict], args: argparse.Namespace) -> None:
+    """Print Observability results in the requested format."""
+    if args.format == "json":
+        output_json(results, args.output)
+    elif args.format == "csv":
+        output_csv(
+            [{k: v if not isinstance(v, (dict, list)) else json.dumps(v) for k, v in r.items()} for r in results],
+            args.output,
+        )
+    else:
+        output_toon(results, args.output)
+
+
+def cmd_o11y_query(args: argparse.Namespace) -> None:
+    """Run a metadata lookup against Observability Cloud and print the results."""
+    client = get_o11y_client(get_single_profile(args))
+    if args.o11y_command == "metrics":
+        results = client.metrics(args.query, args.limit)
+    elif args.o11y_command == "mts":
+        results = client.metric_time_series(args.query, args.limit)
+    elif args.o11y_command == "detectors":
+        results = client.detectors(args.name, args.limit)
+    else:  # incidents
+        results = client.incidents(args.resolved, args.limit)
+    _output_o11y(results, args)
+
+
+def cmd_o11y_signalflow(args: argparse.Namespace) -> None:
+    """Run a SignalFlow program and print the datapoints."""
+    client = get_o11y_client(get_single_profile(args))
+    start = parse_time_ms(args.earliest)
+    stop = parse_time_ms(args.latest)
+    resolution = parse_duration_ms(args.resolution) if args.resolution else None
+    rows = []
+    for row in client.signalflow(args.program, start, stop, resolution):
+        rows.append(row)
+        if len(rows) >= args.limit:
+            break
+    if not rows:
+        print(
+            "No datapoints. Does the program end with .publish()? Is the time range right?",
+            file=sys.stderr,
+        )
+        return
+    _output_o11y(rows, args)
+
+
+def cmd_o11y_services(args: argparse.Namespace) -> None:
+    """List APM services (or the dependency edges between them)."""
+    client = get_o11y_client(get_single_profile(args))
+    topo = client.services(parse_time_ms(args.earliest), parse_time_ms(args.latest))
+    if args.edges:
+        items = topo.get("edges", [])
+        key = lambda r: f"{r.get('fromNode', '')} {r.get('toNode', '')}"
+    else:
+        items = topo.get("nodes", [])
+        key = lambda r: r.get("serviceName", "")
+        if args.type:
+            items = [n for n in items if n.get("type") == args.type]
+    if args.patterns:
+        items = [r for r in items if any(fnmatch.fnmatch(key(r).lower(), p.lower()) for p in args.patterns)]
+    _output_o11y(items[: args.limit], args)
+
+
+def cmd_o11y_trace(args: argparse.Namespace) -> None:
+    """Download the spans of an APM trace by ID."""
+    client = get_o11y_client(get_single_profile(args))
+    _output_o11y(client.trace(args.trace_id), args)
+
+
 def cmd_mcp_set(args: argparse.Namespace) -> None:
     """Save an MCP server URL and token into a profile's TOML block."""
     name = resolve_profile_name(get_single_profile(args))
@@ -627,6 +720,8 @@ def cmd_mcp_tools(args: argparse.Namespace) -> None:
         return
     for tool in tools:
         print(f"{tool['name']}: {tool.get('description', '')}")
+        if args.schema:
+            print(json.dumps(tool.get("inputSchema", {}), indent=2))
 
 
 def _parse_tool_arg_value(value: str):
@@ -693,6 +788,23 @@ def main() -> None:
         version=f"%(prog)s {__version__}",
     )
 
+    # --mcp / --rest: choose the search backend (default: the profile's `mode`).
+    backend_parent = argparse.ArgumentParser(add_help=False)
+    backend_group = backend_parent.add_mutually_exclusive_group()
+    backend_group.add_argument(
+        "--mcp",
+        dest="mcp",
+        action="store_true",
+        default=None,
+        help="Run the search through the profile's MCP server instead of the REST API",
+    )
+    backend_group.add_argument(
+        "--rest",
+        dest="mcp",
+        action="store_false",
+        help="Force the REST API even if the profile has mode = \"mcp\"",
+    )
+
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # init command
@@ -757,7 +869,7 @@ def main() -> None:
     )
 
     search_parser = subparsers.add_parser(
-        "search", help="Execute SPL query", parents=[profile_parent, search_options_parent]
+        "search", help="Execute SPL query", parents=[profile_parent, backend_parent, search_options_parent]
     )
     search_parser.add_argument("query", help="SPL query to execute")
     search_parser.set_defaults(func=cmd_search)
@@ -766,7 +878,7 @@ def main() -> None:
     ask_parser = subparsers.add_parser(
         "ask",
         help="Ask a free-form question; generates SPL via MCP/SAIA and runs it",
-        parents=[profile_parent, search_options_parent],
+        parents=[profile_parent, backend_parent, search_options_parent],
     )
     ask_parser.add_argument("question", help="Free-form natural-language question")
     ask_parser.add_argument(
@@ -776,7 +888,7 @@ def main() -> None:
 
     # discover command
     discover_parser = subparsers.add_parser(
-        "discover", help="Discover available indexes", parents=[profile_parent]
+        "discover", help="Discover available indexes", parents=[profile_parent, backend_parent]
     )
     discover_parser.add_argument(
         "patterns",
@@ -819,6 +931,9 @@ def main() -> None:
     mcp_tools_parser = mcp_subparsers.add_parser(
         "tools", help="List tools exposed by the MCP server", parents=[profile_parent]
     )
+    mcp_tools_parser.add_argument(
+        "--schema", action="store_true", help="Also print each tool's input schema"
+    )
     mcp_tools_parser.set_defaults(func=cmd_mcp_tools)
 
     mcp_call_parser = mcp_subparsers.add_parser(
@@ -839,6 +954,95 @@ def main() -> None:
             sys.exit(1)
 
     mcp_parser.set_defaults(func=cmd_mcp)
+
+    # oy command group (Splunk Observability Cloud / SignalFx)
+    o11y_parser = subparsers.add_parser(
+        "oy", help="Query Splunk Observability Cloud (SignalFx)"
+    )
+    o11y_subparsers = o11y_parser.add_subparsers(dest="o11y_command", help="Observability subcommands")
+
+    o11y_set_parser = o11y_subparsers.add_parser(
+        "set", help="Save Observability realm and API token for a profile", parents=[profile_parent]
+    )
+    o11y_set_parser.add_argument("realm", nargs="?", help="Realm, e.g. eu0 or us1")
+    o11y_set_parser.add_argument("token", nargs="?", help="Observability API token")
+    o11y_set_parser.set_defaults(func=cmd_o11y_set)
+
+    o11y_options_parent = argparse.ArgumentParser(add_help=False)
+    o11y_options_parent.add_argument(
+        "--limit", "-n", type=int, default=100, help="Max results (default: 100)"
+    )
+    o11y_options_parent.add_argument(
+        "--format", "-f", choices=["json", "csv", "toon"], default="toon",
+        help="Output format (default: toon)",
+    )
+    o11y_options_parent.add_argument("--output", "-o", help="Output file (default: stdout)")
+
+    for cmd, help_text in (
+        ("metrics", "Search metric names"),
+        ("mts", "Search metric time series metadata"),
+    ):
+        sp = o11y_subparsers.add_parser(
+            cmd, help=help_text, parents=[profile_parent, o11y_options_parent]
+        )
+        sp.add_argument(
+            "query", nargs="?", help="Query, e.g. 'sf_metric:cpu*' or 'host:web-1' (default: all)"
+        )
+        sp.set_defaults(func=cmd_o11y_query)
+
+    o11y_det_parser = o11y_subparsers.add_parser(
+        "detectors", help="Search detectors", parents=[profile_parent, o11y_options_parent]
+    )
+    o11y_det_parser.add_argument("name", nargs="?", help="Detector name (substring match)")
+    o11y_det_parser.set_defaults(func=cmd_o11y_query)
+
+    o11y_inc_parser = o11y_subparsers.add_parser(
+        "incidents", help="List incidents", parents=[profile_parent, o11y_options_parent]
+    )
+    o11y_inc_parser.add_argument(
+        "--resolved", action="store_true", help="Include resolved incidents"
+    )
+    o11y_inc_parser.set_defaults(func=cmd_o11y_query)
+
+    o11y_sf_parser = o11y_subparsers.add_parser(
+        "query",
+        help="Run a SignalFlow program and print its datapoints",
+        parents=[profile_parent, o11y_options_parent],
+    )
+    o11y_sf_parser.add_argument(
+        "program", help="SignalFlow program, e.g. \"data('cpu.utilization').mean(by=['aws_region']).publish()\""
+    )
+    o11y_sf_parser.add_argument("--earliest", "-e", default="-1h", help="Start (default: -1h)")
+    o11y_sf_parser.add_argument("--latest", "-l", default="now", help="End (default: now)")
+    o11y_sf_parser.add_argument(
+        "--resolution", "-r", help="Minimum data resolution, e.g. 1m, 5m (default: chosen by server)"
+    )
+    o11y_sf_parser.set_defaults(func=cmd_o11y_signalflow)
+
+    o11y_svc_parser = o11y_subparsers.add_parser(
+        "services", help="List APM services", parents=[profile_parent, o11y_options_parent]
+    )
+    o11y_svc_parser.add_argument("patterns", nargs="*", help="Glob patterns to filter names (e.g. 'onp*')")
+    o11y_svc_parser.add_argument("--earliest", "-e", default="-1h", help="Start (default: -1h)")
+    o11y_svc_parser.add_argument("--latest", "-l", default="now", help="End (default: now)")
+    o11y_svc_parser.add_argument("--edges", action="store_true", help="List dependency edges instead of services")
+    o11y_svc_parser.add_argument(
+        "--type", help="Only nodes of this type (service, database, pubsub)"
+    )
+    o11y_svc_parser.set_defaults(func=cmd_o11y_services)
+
+    o11y_trace_parser = o11y_subparsers.add_parser(
+        "trace", help="Download an APM trace's spans by trace ID", parents=[profile_parent, o11y_options_parent]
+    )
+    o11y_trace_parser.add_argument("trace_id", help="Trace ID")
+    o11y_trace_parser.set_defaults(func=cmd_o11y_trace)
+
+    def cmd_o11y(args: argparse.Namespace) -> None:
+        if not args.o11y_command:
+            o11y_parser.print_help()
+            sys.exit(1)
+
+    o11y_parser.set_defaults(func=cmd_o11y)
 
     args = parser.parse_args()
 

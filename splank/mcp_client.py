@@ -9,10 +9,13 @@ service - a plain Splunk API token is usually rejected).
 
 import json
 import ssl
+import sys
 import urllib.error
 import urllib.request
+from typing import Iterator
 
 from splank import __version__
+from splank.client import build_spl
 
 PROTOCOL_VERSION = "2025-06-18"
 
@@ -37,6 +40,7 @@ class MCPClient:
         self.session_id: str | None = None
         self._next_id = 0
         self._initialized = False
+        self._tool_schemas: dict[str, dict] | None = None
 
     def _request_id(self) -> int:
         self._next_id += 1
@@ -123,3 +127,95 @@ class MCPClient:
         """Call a tool by name and return its result."""
         self.initialize()
         return self._call("tools/call", {"name": name, "arguments": arguments or {}})
+
+    # ------------------------------------------------------------------
+    # Search (a SplunkClient.search-compatible interface over MCP)
+    # ------------------------------------------------------------------
+
+    SEARCH_TOOL = "splunk_run_query"
+
+    def _tool_properties(self, name: str) -> dict:
+        """Return the `inputSchema.properties` of a tool (empty if unknown)."""
+        if self._tool_schemas is None:
+            self._tool_schemas = {t["name"]: t for t in self.list_tools()}
+        tool = self._tool_schemas.get(name)
+        if tool is None:
+            raise RuntimeError(f"MCP server does not expose a {name!r} tool")
+        return (tool.get("inputSchema") or {}).get("properties") or {}
+
+    @staticmethod
+    def _rows_from_payload(payload) -> list[dict] | None:
+        """Pull a list of row dicts out of a decoded JSON payload, if it has one."""
+        if isinstance(payload, list):
+            return [r for r in payload if isinstance(r, dict)]
+        if isinstance(payload, dict):
+            for key in ("results", "rows", "events"):
+                if isinstance(payload.get(key), list):
+                    return [r for r in payload[key] if isinstance(r, dict)]
+        return None
+
+    @classmethod
+    def parse_search_result(cls, result: dict) -> list[dict]:
+        """Extract result rows from a tools/call result for a search tool."""
+        texts = [
+            b.get("text", "")
+            for b in result.get("content") or []
+            if b.get("type") == "text"
+        ]
+        if result.get("isError"):
+            raise RuntimeError("\n".join(texts) or "MCP search tool reported an error")
+
+        rows = cls._rows_from_payload(result.get("structuredContent"))
+        if rows is not None:
+            return rows
+
+        for text in texts:
+            try:
+                rows = cls._rows_from_payload(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+            if rows is not None:
+                return rows
+
+        snippet = (texts[0] if texts else json.dumps(result))[:300]
+        raise RuntimeError(f"Could not parse rows from MCP search result: {snippet}")
+
+    def search(
+        self,
+        query: str,
+        earliest: str = "-24h",
+        latest: str = "now",
+        max_results: int = 100,
+        stream: bool = False,  # accepted for SplunkClient compatibility; MCP can't stream
+    ) -> Iterator[dict]:
+        """Run a search through the MCP server's query tool and yield result rows."""
+        spl = build_spl(query, max_results)
+        props = self._tool_properties(self.SEARCH_TOOL)
+
+        arguments: dict = {"query": spl}
+        if "row_limit" in props:
+            arguments["row_limit"] = max_results
+
+        # Pass the time range as tool arguments if the tool has them; otherwise
+        # fall back to inlining it into the SPL (only possible for `search ...`).
+        earliest_key = next((k for k in props if k.lower().startswith("earliest")), None)
+        latest_key = next((k for k in props if k.lower().startswith("latest")), None)
+        if earliest_key:
+            arguments[earliest_key] = earliest
+        if latest_key:
+            arguments[latest_key] = latest
+        if not (earliest_key or latest_key):
+            if spl.lstrip().startswith("search "):
+                spl = spl.replace(
+                    "search ", f"search earliest={earliest} latest={latest} ", 1
+                )
+                arguments["query"] = spl
+            else:
+                print(
+                    f"Warning: {self.SEARCH_TOOL} has no time-range arguments and the query "
+                    "starts with '|'; --earliest/--latest are ignored (put them in the SPL).",
+                    file=sys.stderr,
+                )
+
+        result = self.call_tool(self.SEARCH_TOOL, arguments)
+        yield from self.parse_search_result(result)
