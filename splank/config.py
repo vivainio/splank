@@ -12,7 +12,7 @@ from platformdirs import user_config_dir
 
 from splank.client import SplunkClient
 from splank.mcp_client import MCPClient
-from splank.o11y_client import O11yClient, api_url_for_realm
+from splank.o11y_client import O11yClient, api_url_for_realm, mcp_url_for_realm
 
 CONFIG_DIR = Path(user_config_dir("splank", appauthor=False))
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.toml"
@@ -155,6 +155,30 @@ def get_o11y_client(profile: str | None = None) -> O11yClient:
         api_url=api_url or api_url_for_realm(realm),
         token=token,
         verify_ssl=creds.get("verify_ssl", True),
+    )
+
+
+def get_o11y_mcp_client(profile: str | None = None) -> MCPClient:
+    """Create a client for the Splunk Observability Cloud MCP gateway.
+
+    Uses ``o11y_realm`` and ``o11y_token``; the gateway URL is derived from the realm
+    unless the profile sets ``o11y_mcp_url``. ``o11y_mcp_toolsets`` (comma-separated)
+    selects extra toolsets beyond the server default.
+    """
+    creds = get_profile(profile)
+    token = creds.get("o11y_token")
+    realm = creds.get("o11y_realm")
+    if not token or not realm:
+        print("'o11y_realm' and 'o11y_token' are not set for this profile.", file=sys.stderr)
+        print("Run 'splank oy set <realm> <token>' to configure them.", file=sys.stderr)
+        sys.exit(1)
+
+    url = creds.get("o11y_mcp_url") or mcp_url_for_realm(realm)
+    headers = {"X-SF-REALM": realm, "X-SF-TOKEN": token}
+    if creds.get("o11y_mcp_toolsets"):
+        headers["X-SPLUNK-O11Y-TOOL-SETS"] = str(creds["o11y_mcp_toolsets"])
+    return MCPClient(
+        url=url, token=token, verify_ssl=creds.get("verify_ssl", True), headers=headers
     )
 
 

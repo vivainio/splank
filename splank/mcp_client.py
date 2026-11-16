@@ -33,9 +33,18 @@ def get_ssl_context(verify: bool = True) -> ssl.SSLContext:
 class MCPClient:
     """JSON-RPC client for an MCP server's Streamable HTTP transport."""
 
-    def __init__(self, url: str, token: str | None = None, verify_ssl: bool = True):
+    def __init__(
+        self,
+        url: str,
+        token: str | None = None,
+        verify_ssl: bool = True,
+        headers: dict[str, str] | None = None,
+        timeout: float = 120,
+    ):
         self.url = url
         self.token = token
+        self.extra_headers = dict(headers or {})
+        self.timeout = timeout
         self.ssl_context = get_ssl_context(verify_ssl)
         self.session_id: str | None = None
         self._next_id = 0
@@ -53,13 +62,14 @@ class MCPClient:
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        headers.update(self.extra_headers)
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
 
         body = json.dumps(payload).encode()
         req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, context=self.ssl_context) as resp:
+            with urllib.request.urlopen(req, context=self.ssl_context, timeout=self.timeout) as resp:
                 session_id = resp.headers.get("Mcp-Session-Id")
                 if session_id:
                     self.session_id = session_id

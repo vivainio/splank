@@ -20,6 +20,25 @@ def api_url_for_realm(realm: str) -> str:
     return f"https://api.{realm.strip()}.observability.splunkcloud.com"
 
 
+# Observability realm -> MCP gateway region (https://region-<region>.api.scs.splunk.com/...).
+MCP_GATEWAY_REGIONS = {
+    "eu0": "dub10", "eu1": "fra10", "eu2": "lon10",
+    "us0": "iad10", "us1": "pdx10", "us2": "pdx10", "us3": "pdx10",
+    "jp0": "tyo10", "au0": "syd10", "sg0": "sin10",
+}
+
+
+def mcp_url_for_realm(realm: str) -> str:
+    """Derive the Observability MCP gateway URL from a realm such as 'eu0'."""
+    region = MCP_GATEWAY_REGIONS.get(realm.strip().lower())
+    if not region:
+        raise ValueError(
+            f"No known MCP gateway for realm {realm!r}; set o11y_mcp_url on the profile "
+            f"(known realms: {', '.join(sorted(MCP_GATEWAY_REGIONS))})"
+        )
+    return f"https://region-{region}.api.scs.splunk.com/system/mcp-gateway/v1/"
+
+
 def parse_time_ms(value: str, now: float | None = None) -> int:
     """Parse 'now', a relative time like '-1h', epoch seconds/ms, or an ISO 8601 time to epoch ms."""
     now = time.time() if now is None else now
@@ -300,3 +319,84 @@ def _series_labels(props: dict) -> dict:
             continue
         labels[key] = props[key]
     return {k: v for k, v in labels.items() if v is not None}
+
+
+# ---------------------------------------------------------------------------
+# Observability MCP gateway (APM trace discovery)
+# ---------------------------------------------------------------------------
+
+MCP_TOOL_PREFIX = "o11y_"
+
+
+def call_mcp_tool(mcp, name: str, params: dict | None = None):
+    """Call an Observability MCP tool (arguments go inside a `params` object) and decode its JSON text."""
+    result = mcp.call_tool(MCP_TOOL_PREFIX + name, {"params": params or {}})
+    texts = [b.get("text", "") for b in result.get("content") or [] if b.get("type") == "text"]
+    text = "\n".join(texts)
+    if result.get("isError") or text.startswith("Invalid arguments"):
+        raise RuntimeError(text or f"MCP tool {name} failed")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Unexpected response from MCP tool {name}: {text[:300]}")
+
+
+def apm_environments(mcp) -> list[str]:
+    """Names of the APM environments."""
+    data = call_mcp_tool(mcp, "get_apm_environments")
+    return [e["name"] for e in data.get("environments", [])]
+
+
+def exemplar_traces(
+    mcp,
+    service: str,
+    environment: str,
+    start: str = "-1h",
+    stop: str = "now",
+    kind: str = "req",
+    min_ms: float | None = None,
+    max_ms: float | None = None,
+    tags: dict[str, list[str]] | None = None,
+) -> tuple[list[dict], dict]:
+    """Sample traces for a service (kind: req = any, err = has errors, rc_err = root-cause errors).
+
+    Returns (rows, status). The server returns only a handful of samples and may time out
+    on busy services (status.is_partial); narrow the time range or add filters then.
+    """
+    params: dict = {
+        "environment_name": environment,
+        "service_name": service,
+        "exemplar_type": kind,
+        "time_range": {"start": start, "stop": stop},
+    }
+    if min_ms is not None:
+        params["min_latency_micros"] = int(min_ms * 1000)
+    if max_ms is not None:
+        params["max_latency_micros"] = int(max_ms * 1000)
+    if tags:
+        params["tags_or_dimensions"] = tags
+    data = call_mcp_tool(mcp, "get_apm_exemplar_traces", params)
+
+    rows = []
+    for entry in data.get("items", []):
+        it = entry.get("item", entry)
+        errors = [
+            c["service"] + (" (root cause)" if any(e.get("isRootCause") for e in c.get("errors", [])) else "")
+            for c in it.get("serviceSpanCounts", [])
+            if c.get("errors")
+        ]
+        rows.append({
+            "traceId": it.get("traceId"),
+            "start": datetime.fromtimestamp(it["startTimeMicros"] / 1e6, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if it.get("startTimeMicros") else None,
+            "service": it.get("initiatingService"),
+            "operation": it.get("initiatingOperation"),
+            "durationMs": round(it.get("durationMicros", 0) / 1000, 3),
+            "errorServices": errors,
+            "spansByService": {c["service"]: c["spanCount"] for c in it.get("serviceSpanCounts", [])},
+            "link": (it.get("link") or {}).get("url"),
+        })
+    status = data.get("status") or {}
+    if data.get("warning"):
+        status = {**status, "warning": data["warning"]}
+    return rows, status

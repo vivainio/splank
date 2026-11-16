@@ -10,7 +10,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, urlparse
 
 from splank._vendor.toon_format import encode as toon_encode
-from splank.o11y_client import compare_windows, parse_duration_ms, parse_time_ms, parse_window
+from splank.o11y_client import (
+    apm_environments,
+    compare_windows,
+    exemplar_traces,
+    parse_duration_ms,
+    parse_time_ms,
+    parse_window,
+)
 from typing import Iterator
 
 from splank import __version__
@@ -19,6 +26,7 @@ from splank.config import (
     get_client,
     get_mcp_client,
     get_o11y_client,
+    get_o11y_mcp_client,
     init_config,
     resolve_profile_name,
     set_mcp_config,
@@ -686,10 +694,13 @@ def cmd_o11y_compare(args: argparse.Namespace) -> None:
     start = min(before[0], after[0])
     stop = min(max(before[1], after[1]), parse_time_ms("now"))
     resolution = parse_duration_ms(args.resolution)
-    group_by = [g.strip() for g in args.group_by.split(",") if g.strip()]
+    group_by = [g.strip() for g in (args.group_by or "").split(",") if g.strip()]
     focus = {f.strip().lower() for f in args.focus.split(",") if f.strip()} if args.focus else None
 
     rows = list(client.signalflow(args.program, start, stop, resolution))
+    if not group_by and rows:
+        # Default: group by every dimension the series carries.
+        group_by = [k for k in rows[0] if k not in ("timestamp", "value", "label", "metric")]
     results = compare_windows(
         rows, group_by, before, after, args.stat, not args.include_weekends, args.min_points, focus
     )
@@ -726,6 +737,50 @@ def cmd_o11y_services(args: argparse.Namespace) -> None:
     if args.patterns:
         items = [r for r in items if any(fnmatch.fnmatch(key(r).lower(), p.lower()) for p in args.patterns)]
     _output_o11y(items[: args.limit], args)
+
+
+def cmd_o11y_envs(args: argparse.Namespace) -> None:
+    """List APM environments (via the Observability MCP gateway)."""
+    mcp = get_o11y_mcp_client(get_single_profile(args))
+    _output_o11y([{"environment": e} for e in apm_environments(mcp)], args)
+
+
+def cmd_o11y_traces(args: argparse.Namespace) -> None:
+    """Find sample APM traces for a service (via the Observability MCP gateway)."""
+    mcp = get_o11y_mcp_client(get_single_profile(args))
+    env = args.env
+    if not env:
+        envs = apm_environments(mcp)
+        if len(envs) != 1:
+            print(
+                "Pass --env. Available environments: " + (", ".join(envs[:30]) or "(none)"),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        env = envs[0]
+
+    tags: dict[str, list[str]] = {}
+    for item in args.tag or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            print(f"--tag expects key=value, got {item!r}", file=sys.stderr)
+            sys.exit(1)
+        tags.setdefault(key, []).append(value)
+
+    kind = {"any": "req", "error": "err", "root-cause": "rc_err"}[args.type]
+    rows, status = exemplar_traces(
+        mcp, args.service, env, args.earliest, args.latest, kind, args.min_ms, args.max_ms, tags or None
+    )
+    if status.get("is_partial") or status.get("warning"):
+        print(
+            "Warning: " + (status.get("warning") or "partial results")
+            + " Try a shorter --earliest range or add --tag / --min-ms filters.",
+            file=sys.stderr,
+        )
+    if not rows:
+        print("No matching traces.", file=sys.stderr)
+        return
+    _output_o11y(rows[: args.limit], args)
 
 
 def cmd_o11y_trace(args: argparse.Namespace) -> None:
@@ -1084,7 +1139,7 @@ def main() -> None:
         "--after", nargs=2, required=True, metavar=("START", "END"), help="After window"
     )
     o11y_cmp_parser.add_argument(
-        "--group-by", "-g", default="host", help="Dimension(s) to compare per, comma-separated (default: host)"
+        "--group-by", "-g", help="Dimension(s) to compare per, comma-separated (default: all dimensions of the published series)"
     )
     o11y_cmp_parser.add_argument(
         "--focus", help="Comma-separated group values that are the subject (e.g. rollout clusters); the rest are labeled control"
@@ -1114,6 +1169,35 @@ def main() -> None:
         "--type", help="Only nodes of this type (service, database, pubsub)"
     )
     o11y_svc_parser.set_defaults(func=cmd_o11y_services)
+
+    o11y_envs_parser = o11y_subparsers.add_parser(
+        "envs", help="List APM environments", parents=[profile_parent, o11y_options_parent]
+    )
+    o11y_envs_parser.set_defaults(func=cmd_o11y_envs)
+
+    o11y_traces_parser = o11y_subparsers.add_parser(
+        "traces",
+        help="Find sample APM traces for a service (errors, slow, tagged)",
+        parents=[profile_parent, o11y_options_parent],
+    )
+    o11y_traces_parser.add_argument("service", help="APM service name")
+    o11y_traces_parser.add_argument(
+        "--env", help="APM environment (default: the only one, if there is just one; see 'oy envs')"
+    )
+    o11y_traces_parser.add_argument(
+        "--type",
+        choices=["any", "error", "root-cause"],
+        default="any",
+        help="any trace, traces with errors, or traces where this service is the root cause (default: any)",
+    )
+    o11y_traces_parser.add_argument("--min-ms", type=float, help="Only traces at least this long (ms)")
+    o11y_traces_parser.add_argument("--max-ms", type=float, help="Only traces at most this long (ms)")
+    o11y_traces_parser.add_argument(
+        "--tag", action="append", metavar="KEY=VALUE", help="Span tag filter (repeatable; same key = any of)"
+    )
+    o11y_traces_parser.add_argument("--earliest", "-e", default="-1h", help="Start (default: -1h)")
+    o11y_traces_parser.add_argument("--latest", "-l", default="now", help="End (default: now)")
+    o11y_traces_parser.set_defaults(func=cmd_o11y_traces)
 
     o11y_trace_parser = o11y_subparsers.add_parser(
         "trace", help="Download an APM trace's spans by trace ID", parents=[profile_parent, o11y_options_parent]
