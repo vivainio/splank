@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, urlparse
 
 from splank._vendor.toon_format import encode as toon_encode
-from splank.o11y_client import parse_duration_ms, parse_time_ms
+from splank.o11y_client import compare_windows, parse_duration_ms, parse_time_ms, parse_window
 from typing import Iterator
 
 from splank import __version__
@@ -646,7 +646,13 @@ def cmd_o11y_query(args: argparse.Namespace) -> None:
     elif args.o11y_command == "detectors":
         results = client.detectors(args.name, args.limit)
     else:  # incidents
-        results = client.incidents(args.resolved, args.limit)
+        results = client.incidents(
+            args.resolved,
+            args.limit,
+            detector=args.detector,
+            since_ms=parse_time_ms(args.since) if args.since else None,
+            until_ms=parse_time_ms(args.until) if args.until else None,
+        )
     _output_o11y(results, args)
 
 
@@ -668,6 +674,41 @@ def cmd_o11y_signalflow(args: argparse.Namespace) -> None:
         )
         return
     _output_o11y(rows, args)
+
+
+def cmd_o11y_compare(args: argparse.Namespace) -> None:
+    """Compare a SignalFlow metric between a before and an after window, per group."""
+    import statistics
+
+    client = get_o11y_client(get_single_profile(args))
+    before = parse_window(*args.before)
+    after = parse_window(*args.after)
+    start = min(before[0], after[0])
+    stop = min(max(before[1], after[1]), parse_time_ms("now"))
+    resolution = parse_duration_ms(args.resolution)
+    group_by = [g.strip() for g in args.group_by.split(",") if g.strip()]
+    focus = {f.strip().lower() for f in args.focus.split(",") if f.strip()} if args.focus else None
+
+    rows = list(client.signalflow(args.program, start, stop, resolution))
+    results = compare_windows(
+        rows, group_by, before, after, args.stat, not args.include_weekends, args.min_points, focus
+    )
+    if not results:
+        print(
+            f"No groups with >= {args.min_points} datapoints in both windows "
+            f"({len(rows)} datapoints fetched). Check the program, windows and --group-by.",
+            file=sys.stderr,
+        )
+        return
+    if focus is not None:
+        for role in ("focus", "control"):
+            pcts = [r["change_pct"] for r in results if r["role"] == role and r["change_pct"] is not None]
+            if pcts:
+                print(
+                    f"{role}: {len(pcts)} groups, median change {statistics.median(pcts):+.1f}%",
+                    file=sys.stderr,
+                )
+    _output_o11y(results, args)
 
 
 def cmd_o11y_services(args: argparse.Namespace) -> None:
@@ -1002,6 +1043,15 @@ def main() -> None:
     o11y_inc_parser.add_argument(
         "--resolved", action="store_true", help="Include resolved incidents"
     )
+    o11y_inc_parser.add_argument(
+        "--detector", help="Only incidents whose detector name contains this text (case-insensitive)"
+    )
+    o11y_inc_parser.add_argument(
+        "--since", help="Only incidents last updated at/after this time (e.g. -7d, 2026-10-24)"
+    )
+    o11y_inc_parser.add_argument(
+        "--until", help="Only incidents last updated at/before this time"
+    )
     o11y_inc_parser.set_defaults(func=cmd_o11y_query)
 
     o11y_sf_parser = o11y_subparsers.add_parser(
@@ -1018,6 +1068,40 @@ def main() -> None:
         "--resolution", "-r", help="Minimum data resolution, e.g. 1m, 5m (default: chosen by server)"
     )
     o11y_sf_parser.set_defaults(func=cmd_o11y_signalflow)
+
+    o11y_cmp_parser = o11y_subparsers.add_parser(
+        "compare",
+        help="Compare a metric between a before and an after window, per group (optionally vs a control)",
+        parents=[profile_parent, o11y_options_parent],
+    )
+    o11y_cmp_parser.add_argument(
+        "program", help="SignalFlow program ending in .publish(); group dimensions must survive (e.g. mean(by=['host']))"
+    )
+    o11y_cmp_parser.add_argument(
+        "--before", nargs=2, required=True, metavar=("START", "END"), help="Before window (a date-only END includes that day)"
+    )
+    o11y_cmp_parser.add_argument(
+        "--after", nargs=2, required=True, metavar=("START", "END"), help="After window"
+    )
+    o11y_cmp_parser.add_argument(
+        "--group-by", "-g", default="host", help="Dimension(s) to compare per, comma-separated (default: host)"
+    )
+    o11y_cmp_parser.add_argument(
+        "--focus", help="Comma-separated group values that are the subject (e.g. rollout clusters); the rest are labeled control"
+    )
+    o11y_cmp_parser.add_argument(
+        "--stat", choices=["median", "mean", "max", "min"], default="median", help="Statistic per window (default: median)"
+    )
+    o11y_cmp_parser.add_argument(
+        "--resolution", "-r", default="1d", help="Datapoint resolution (default: 1d)"
+    )
+    o11y_cmp_parser.add_argument(
+        "--min-points", type=int, default=5, help="Min datapoints per window per group (default: 5)"
+    )
+    o11y_cmp_parser.add_argument(
+        "--include-weekends", action="store_true", help="Keep Saturday/Sunday datapoints (default: excluded, UTC)"
+    )
+    o11y_cmp_parser.set_defaults(func=cmd_o11y_compare)
 
     o11y_svc_parser = o11y_subparsers.add_parser(
         "services", help="List APM services", parents=[profile_parent, o11y_options_parent]

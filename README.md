@@ -95,6 +95,11 @@ splank -p obs oy metrics 'sf_metric:cpu*'
 splank -p obs oy mts 'sf_metric:cpu.utilization' -n 20
 splank -p obs oy detectors 'high latency'
 splank -p obs oy incidents --resolved -f json
+splank -p obs oy incidents --resolved --detector EFS --since 2026-10-24 --until 2026-10-26 -n 1000
+
+# Before/after comparison of a metric per group, optionally against a control
+splank -p obs oy compare "data('request.latency').mean(by=['host']).publish()" \
+  --before 2026-10-10 2026-10-23 --after 2026-10-26 2026-11-16 --focus checkout,search
 
 # SignalFlow: actual metric values (program must end in .publish())
 splank -p obs oy query "data('cpu.utilization').mean(by=['aws_region']).publish()" -e -1h -r 5m
@@ -105,6 +110,15 @@ splank -p obs oy services 'checkout*' --type service
 splank -p obs oy services 'checkout*' --edges
 splank -p obs oy trace d1a8f3e2d7d3700c -f json
 ```
+
+`oy incidents` filters: `--detector TEXT` (substring of the detector name), `--since`/`--until` (on the incident's
+last state change; only the newest ~10000 incidents are reachable through the API).
+
+`oy compare` runs a SignalFlow program once and compares a statistic (`--stat median|mean|max|min`) of its
+datapoints between `--before START END` and `--after START END` per `--group-by` dimension (default
+`host`), at `-r` resolution (default 1d), excluding weekends unless `--include-weekends`. A date-only END
+includes that day, and a group needs `--min-points` (5) datapoints in both windows. With `--focus a,b` the
+groups are labeled focus/control and the median change of each is printed to stderr.
 
 `oy query` takes `-e/--earliest` and `-l/--latest` (`-1h`, `-30m`, `-7d`, `now`, epoch, or ISO 8601) and
 `-r/--resolution` (`1m`, `5m`, …). It prints one row per datapoint with `timestamp`, `value`, `label`, `metric`
